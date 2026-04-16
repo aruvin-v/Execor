@@ -406,6 +406,3 @@ FodyWeavers.xsd
 
 # LLM Models
 models/
-
-src/Execor.UI/appsettings.json
-appsettings*.json

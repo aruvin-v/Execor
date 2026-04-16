@@ -1,0 +1,16 @@
+<Solution>
+  <Folder Name="/config/">
+    <File Path="hardware-profile.json" />
+  </Folder>
+  <Folder Name="/Solution Items/">
+    <File Path="global.json" />
+    <File Path="README.md" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Execor.API/Execor.API.csproj" />
+    <Project Path="src/Execor.Core/Execor.Core.csproj" />
+    <Project Path="src/Execor.Inference/Execor.Inference.csproj" />
+    <Project Path="src/Execor.Models/Execor.Models.csproj" />
+    <Project Path="src/Execor.UI/Execor.UI.csproj" />
+  </Folder>
+</Solution>

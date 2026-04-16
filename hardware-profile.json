@@ -1,0 +1,6 @@
+{
+  "GpuLayers": 30,
+  "BatchSize": 512,
+  "ContextSize": 4096,
+  "FlashAttention": true
+}

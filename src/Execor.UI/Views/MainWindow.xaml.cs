@@ -4,8 +4,10 @@ using Execor.Models;
 using Execor.UI.Services;
 using ICSharpCode.AvalonEdit;
 using ICSharpCode.AvalonEdit.Highlighting;
+using Markdig;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
@@ -34,6 +36,9 @@ public partial class MainWindow : Window
     private CancellationTokenSource? _dashboardCts;
     private readonly IModelManager _modelManager;
     private readonly IChatService _chatService;
+    private bool _isCodeReviewMode = false;
+    private string _reviewBranchName = "";
+    private string _reviewRepoPath = "";
     private enum BlockType { Text, Code }
 
     public MainWindow(IModelManager modelManager, IChatService chatService)
@@ -176,6 +181,23 @@ public partial class MainWindow : Window
                     return;
                 }
             }
+
+            if (prompt.StartsWith("/codereview"))
+            {
+                var repoPath = prompt.Replace("/codereview", "").Trim();
+
+                if (string.IsNullOrWhiteSpace(repoPath) || !Directory.Exists(repoPath))
+                {
+                    AddMessageBubble("Please provide a valid repository path. Example: /codereview C:\\Projects\\MyRepo", isUser: false);
+                    PromptInput.Text = "";
+                    ResetSendState();
+                    return;
+                }
+
+                PromptInput.Text = "";
+                _ = RunCodeReviewAsync(repoPath); // Fire and forget the chunking loop
+                return; // Stop normal chat execution
+            }
         }
         // ==========================================
 
@@ -294,6 +316,11 @@ public partial class MainWindow : Window
                 SyncStreamingUI(assistantBlock, accumulatedText, isFinished: true);
                 ChatScrollViewer.ScrollToEnd();
             });
+
+            if (_isCodeReviewMode)
+            {
+                GenerateWordDocument(accumulatedText);
+            }
         }
         catch (Exception ex)
         {
@@ -627,7 +654,8 @@ public partial class MainWindow : Window
     {
         "/web - Force Web Search",
         "/sys - Analyze PC Performance",
-        "/clear - Clear Chat History"
+        "/clear - Clear Chat History",
+        "/codereview - Review Git changes and export to Word"
     };
 
     private void PromptInput_TextChanged(object sender, TextChangedEventArgs e)
@@ -1040,5 +1068,222 @@ public partial class MainWindow : Window
             }
         }
         return blocks;
+    }
+
+    private async Task RunCodeReviewAsync(string repoPath)
+    {
+        _isGenerating = true;
+        SendButton.IsEnabled = false;
+
+        // Render initial UI state
+        AddMessageBubble($"/codereview {repoPath}", isUser: true);
+        var assistantBlock = AddMessageBubble("🔍 Initializing Code Review Engine...", isUser: false);
+
+        // We will update this single TextBlock to show progress instead of streaming code to the UI
+        var statusText = new TextBlock { FontSize = 15, Foreground = Brushes.White, TextWrapping = TextWrapping.Wrap };
+        assistantBlock.Children.Add(statusText);
+
+        try
+        {
+            _reviewRepoPath = repoPath;
+            _reviewBranchName = RunGitCommandSafe(repoPath, "branch --show-current").Output.Trim();
+
+            // 1. Get working directory & staged files
+            var workingFiles = RunGitCommandSafe(repoPath, "diff --name-only HEAD").Output
+                .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+
+            // 2. Get stashed files (Safely ignores if no stash exists)
+            var stashedFiles = RunGitCommandSafe(repoPath, "stash show --name-only").Output
+                .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+
+            // 3. Combine and deduplicate
+            var allFiles = workingFiles.Concat(stashedFiles).Distinct().ToList();
+
+            if (!allFiles.Any())
+            {
+                statusText.Text = $"No uncommitted or stashed changes found in branch '{_reviewBranchName}'.";
+                return;
+            }
+
+            // Ensure model is loaded before starting
+            var selectedModel = ModelSelector.SelectedItem as ModelInfo;
+            if (selectedModel != null)
+            {
+                var activeModel = _modelManager.GetActiveModel();
+                if (activeModel == null || activeModel.Name != selectedModel.Name)
+                {
+                    await Task.Run(() =>
+                    {
+                        _modelManager.SetActiveModel(selectedModel.Name);
+                        _chatService.LoadActiveModel();
+                    });
+                }
+            }
+
+            // ==========================================
+            // PASS 1: GENERATE GLOBAL CONTEXT (The Blueprint)
+            // ==========================================
+            await Dispatcher.InvokeAsync(() => statusText.Text = "🧠 Pass 1: Analyzing global repository context...");
+
+            // Grab just the names of the files and maybe the commit messages to build a tiny summary
+            string fileListStr = string.Join("\n- ", allFiles);
+            string globalSummaryPrompt = $"You are a senior architect. Look at this list of files modified in the branch '{_reviewBranchName}':\n- {fileListStr}\n\n" +
+                                         $"In 3 short sentences, guess the overall goal of this feature or bug fix. Do not write code.";
+
+            string globalContext = "";
+            await foreach (var chunk in _chatService.StreamChatAsync(globalSummaryPrompt, null))
+            {
+                if (_cts?.IsCancellationRequested == true) break;
+                globalContext += CleanToken(chunk);
+            }
+
+            string masterMarkdown = $"# Code Review for `{_reviewBranchName}`\n\n**AI Global Context Analysis:**\n> {globalContext.Trim()}\n\n---\n\n";
+            int count = 1;
+
+            // ==========================================
+            // PASS 2: THE DEEP CHUNKED REVIEW
+            // ==========================================
+
+            // Safe character limit to prevent exceeding a 4096 context window
+            int maxChunkLength = 4000;
+
+            foreach (var file in allFiles)
+            {
+                string workingDiff = RunGitCommandSafe(repoPath, $"diff HEAD -- \"{file}\"").Output;
+                string stashDiff = RunGitCommandSafe(repoPath, $"stash show -p -- \"{file}\"").Output;
+                string combinedDiff = (workingDiff + "\n" + stashDiff).Trim();
+
+                if (string.IsNullOrWhiteSpace(combinedDiff)) continue;
+
+                // 1. Break the diff into smaller chunks if it's massive
+                var diffChunks = new List<string>();
+                if (combinedDiff.Length <= maxChunkLength)
+                {
+                    diffChunks.Add(combinedDiff);
+                }
+                else
+                {
+                    // Split the text into parts
+                    for (int i = 0; i < combinedDiff.Length; i += maxChunkLength)
+                    {
+                        int length = Math.Min(maxChunkLength, combinedDiff.Length - i);
+                        diffChunks.Add(combinedDiff.Substring(i, length));
+                    }
+                }
+
+                // 2. Process each chunk independently
+                for (int i = 0; i < diffChunks.Count; i++)
+                {
+                    _chatService.ClearHistory(); // Wipe short-term memory to prevent overflow
+
+                    string chunk = diffChunks[i];
+                    string partInfo = diffChunks.Count > 1 ? $" (Part {i + 1} of {diffChunks.Count})" : "";
+
+                    await Dispatcher.InvokeAsync(() =>
+                        statusText.Text = $"📝 Pass 2: Reviewing file {count} of {allFiles.Count}{partInfo}:\n`{file}`..."
+                    );
+
+                    string prompt = $"You are reviewing code. Keep in mind the overarching goal of this branch is:\n'{globalContext.Trim()}'\n\n" +
+                                    $"Review these specific changes for the file '{file}'{partInfo}.\n" +
+                                    $"Identify bugs, suggest improvements, and format clearly.\n\n" +
+                                    $"### GIT DIFF:\n```diff\n{chunk}\n```";
+
+                    string fileReview = "";
+                    await foreach (var token in _chatService.StreamChatAsync(prompt, null))
+                    {
+                        if (_cts?.IsCancellationRequested == true) break;
+                        fileReview += CleanToken(token);
+                    }
+
+                    masterMarkdown += $"## File: `{file}`{partInfo}\n{fileReview}\n\n---\n\n";
+                }
+
+                count++;
+            }
+
+            await Dispatcher.InvokeAsync(() => statusText.Text = "📄 Compiling Word Document...");
+
+            // 5. Export to Word
+            GenerateWordDocument(masterMarkdown);
+
+            await Dispatcher.InvokeAsync(() =>
+                statusText.Text = $"✅ Review complete! Analyzed {allFiles.Count} files.\n💾 Document successfully saved to your Desktop."
+            );
+        }
+        catch (Exception ex)
+        {
+            await Dispatcher.InvokeAsync(() => statusText.Text = $"❌ Error during review: {ex.Message}");
+        }
+        finally
+        {
+            ResetSendState();
+        }
+    }
+
+    private (bool Success, string Output) RunGitCommandSafe(string workingDirectory, string arguments)
+    {
+        try
+        {
+            var process = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = "git",
+                    Arguments = arguments,
+                    WorkingDirectory = workingDirectory,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                }
+            };
+
+            process.Start();
+            string output = process.StandardOutput.ReadToEnd();
+            process.WaitForExit();
+
+            // Return success only if ExitCode is 0, safely absorbing errors like "No stash entries found"
+            return (process.ExitCode == 0, output);
+        }
+        catch
+        {
+            return (false, "");
+        }
+    }
+
+    private async void GenerateWordDocument(string markdownContent)
+    {
+        var pipeline = new MarkdownPipelineBuilder().UseAdvancedExtensions().Build();
+        string htmlContent = Markdown.ToHtml(markdownContent, pipeline);
+
+        string wordHtml = $@"
+        <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
+        <head>
+            <meta charset='utf-8'>
+            <title>Code Review</title>
+            <style>
+                body {{ font-family: 'Calibri', sans-serif; font-size: 11pt; line-height: 1.5; }}
+                pre {{ background-color: #f6f8fa; padding: 12px; border: 1px solid #d0d7de; border-radius: 6px; }}
+                code {{ font-family: 'Consolas', monospace; font-size: 10pt; color: #24292f; }}
+                h1, h2, h3 {{ color: #0969da; margin-bottom: 8px; }}
+                h1 {{ font-size: 18pt; border-bottom: 2px solid #0969da; padding-bottom: 4px; }}
+                h2 {{ font-size: 14pt; background-color: #f0f8ff; padding: 4px 8px; }}
+                hr {{ border-top: 1px solid #d0d7de; margin: 20px 0; }}
+            </style>
+        </head>
+        <body>
+            <h1>Code Review Report</h1>
+            <p><strong>Branch:</strong> {_reviewBranchName}</p>
+            <p><strong>Repository:</strong> {_reviewRepoPath}</p>
+            <p><strong>Date Generated:</strong> {DateTime.Now:yyyy-MM-dd HH:mm:ss}</p>
+            <hr/>
+            {htmlContent}
+        </body>
+        </html>";
+
+        string fileName = $"CodeReview_{_reviewBranchName}_{DateTime.Now:yyyyMMdd_HHmmss}.doc";
+        string filePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), fileName);
+
+        await File.WriteAllTextAsync(filePath, wordHtml);
     }
 }

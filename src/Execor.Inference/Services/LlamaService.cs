@@ -311,6 +311,33 @@ public class LlamaService : IChatService
         _weights = null;
         _executor = null;
     }
+
+    public void ClearHistory()
+    {
+        if (_weights == null) return;
+
+        // Destroy the old memory buffer
+        _context?.Dispose();
+
+        // Pull the static profile settings
+        var activeModel = _modelManager.GetActiveModel();
+        var profile = LoadOrBenchmarkHardware(activeModel.FilePath);
+
+        var parameters = new ModelParams(activeModel.FilePath)
+        {
+            ContextSize = (uint)profile.ContextSize,
+            GpuLayerCount = profile.GpuLayers,
+            BatchSize = (uint)profile.BatchSize,
+            FlashAttention = profile.FlashAttention,
+            UseMemorymap = true,
+            UseMemoryLock = false,
+            Threads = Math.Max(4, Environment.ProcessorCount / 2),
+        };
+
+        // Instantly allocate a fresh, empty KV Cache buffer in VRAM
+        _context = _weights.CreateContext(parameters);
+        _executor = new InteractiveExecutor(_context);
+    }
 }
 
 public class HardwareProfile

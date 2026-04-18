@@ -379,6 +379,37 @@ public partial class MainWindow : Window
 
                 return; // Stop normal execution; this was a system command.
             }
+
+            if (prompt.StartsWith("/clear"))
+            {
+                CreateNewChat();
+                PromptInput.Text = "";
+                return; // Stop execution, don't send to LLM
+            }
+
+            // ADD THIS NEW BLOCK:
+            if (prompt.StartsWith("/help", StringComparison.OrdinalIgnoreCase))
+            {
+                // Show the user's message
+                AddMessageBubble(prompt, isUser: true);
+                PromptInput.Text = "";
+
+                // Format the available commands into a nice Markdown list
+                string helpText = "**Available Execor Commands:**\n\n";
+                foreach (var cmd in _availableCommands)
+                {
+                    var parts = cmd.Split('-');
+                    if (parts.Length == 2)
+                    {
+                        helpText += $"- `{parts[0].Trim()}` : {parts[1].Trim()}\n";
+                    }
+                }
+
+                // Show the AI's response with the formatted list
+                AddMessageBubble(helpText, isUser: false);
+                ResetSendState();
+                return; // Stop execution, don't send to LLM
+            }
         }
         // ==========================================
 
@@ -867,6 +898,7 @@ public partial class MainWindow : Window
     // Add this list at the top of your MainWindow class, near your other private fields
     private readonly List<string> _availableCommands = new()
     {
+        "/help - List all available commands",
         "/web - Force Web Search",
         "/sys - Analyze PC Performance",
         "/clear - Clear Chat History",

@@ -1,3 +1,4 @@
+using DocumentFormat.OpenXml.Office2016.Drawing.ChartDrawing;
 using Execor.Core;
 using Execor.Inference.Services;
 using Execor.UI.Services;
@@ -63,6 +64,7 @@ public partial class App : Application
         serviceCollection.AddSingleton<IConfiguration>(configuration);
         serviceCollection.AddSingleton<IModelManager, ModelManager>();
         serviceCollection.AddSingleton<IChatService, LlamaService>();
+        serviceCollection.AddHostedService<BackendHostService>();
 
         // Register the MainWindow itself so DI can provide its dependencies
         serviceCollection.AddSingleton<MainWindow>();

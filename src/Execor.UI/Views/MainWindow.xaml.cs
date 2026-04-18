@@ -872,7 +872,8 @@ public partial class MainWindow : Window
         "/clear - Clear Chat History",
         "/codereview - Review Git changes and export to Word",
         "/db - Chat with the database",
-        "/exit - Exit the application"
+        "/exit - Exit the application",
+        "/workspace - Chat with the files"
     };
 
     private void PromptInput_TextChanged(object sender, TextChangedEventArgs e)

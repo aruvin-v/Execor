@@ -33,6 +33,7 @@ public partial class MainWindow : Window
     private readonly SystemMonitorService _systemMonitor;
     private readonly InferenceMetricsService _metrics;
     private readonly GpuMonitorService _gpuMonitor;
+    private readonly WorkspaceIntelligenceService _workspaceService = new();
     private CancellationTokenSource? _dashboardCts;
     private readonly IModelManager _modelManager;
     private readonly IChatService _chatService;
@@ -140,6 +141,20 @@ public partial class MainWindow : Window
         }
     }
 
+    private void LoadAttachedImage(string imagePath)
+    {
+        _currentImagePath = imagePath;
+        var bitmap = new System.Windows.Media.Imaging.BitmapImage();
+        bitmap.BeginInit();
+        bitmap.UriSource = new Uri(_currentImagePath);
+        bitmap.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad; // Prevents file locking
+        bitmap.EndInit();
+
+        AttachedImagePreview.Source = bitmap;
+        ImagePreviewContainer.Visibility = Visibility.Visible;
+    }
+
+    // Replace your current AttachButton_Click with this cleaner version:
     private void AttachButton_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new Microsoft.Win32.OpenFileDialog
@@ -150,12 +165,38 @@ public partial class MainWindow : Window
 
         if (dialog.ShowDialog() == true)
         {
-            _currentImagePath = dialog.FileName;
+            LoadAttachedImage(dialog.FileName);
+        }
+    }
 
-            // Load and display thumbnail
-            var bitmap = new System.Windows.Media.Imaging.BitmapImage(new Uri(_currentImagePath));
-            AttachedImagePreview.Source = bitmap;
-            ImagePreviewContainer.Visibility = Visibility.Visible;
+    private void PromptInput_PreviewDragOver(object sender, DragEventArgs e)
+    {
+        if (e.Data.GetDataPresent(DataFormats.FileDrop))
+        {
+            e.Effects = DragDropEffects.Copy;
+            e.Handled = true;
+        }
+        else
+        {
+            e.Effects = DragDropEffects.None;
+        }
+    }
+
+    private void PromptInput_Drop(object sender, DragEventArgs e)
+    {
+        if (e.Data.GetDataPresent(DataFormats.FileDrop))
+        {
+            string[] files = (string[])e.Data.GetData(DataFormats.FileDrop);
+            if (files != null && files.Length > 0)
+            {
+                string firstFile = files[0];
+                string ext = System.IO.Path.GetExtension(firstFile).ToLower();
+
+                if (ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".bmp" || ext == ".webp")
+                {
+                    LoadAttachedImage(firstFile);
+                }
+            }
         }
     }
 
@@ -249,6 +290,94 @@ public partial class MainWindow : Window
             {
                 Close();
                 return;
+            }
+
+            string finalPrompt = PromptInput.Text.Trim();
+
+            if (finalPrompt.StartsWith("/workspace", StringComparison.OrdinalIgnoreCase))
+            {
+                string[] parts = finalPrompt.Split(' ', 2);
+                string path = parts.Length > 1 ? parts[1].Trim() : "";
+
+                if (path.ToLower() == "clear")
+                {
+                    _workspaceService.Clear();
+                    // TODO: Append a system message to your chat UI indicating "Workspace Cleared"
+                    PromptInput.Clear();
+                    return;
+                }
+
+                if (!Directory.Exists(path))
+                {
+                    // TODO: Append system message to UI indicating "Directory not found."
+                    return;
+                }
+
+                // Safely locate the models directory regardless of Debug or Release mode
+                string currentDir = AppDomain.CurrentDomain.BaseDirectory;
+                string modelsDir = System.IO.Path.Combine(currentDir, "models");
+
+                // Walk up the directory tree to find the root 'models' folder
+                while (!System.IO.Directory.Exists(modelsDir) && System.IO.Directory.GetParent(currentDir) != null)
+                {
+                    currentDir = System.IO.Directory.GetParent(currentDir)!.FullName;
+                    modelsDir = System.IO.Path.Combine(currentDir, "models");
+                }
+
+                if (!System.IO.Directory.Exists(modelsDir))
+                {
+                    // Optionally append a message to the UI here
+                    return;
+                }
+
+                string? embedModel = Directory.GetFiles(modelsDir, "*embed*.gguf").FirstOrDefault();
+                if (embedModel == null)
+                {
+                    // TODO: Append system message: "Missing embedding model (e.g., mxbai-embed-large.gguf) in models folder."
+                    return;
+                }
+
+                // TODO: Append system message: $"Indexing {path} using {System.IO.Path.GetFileName(embedModel)}..."
+
+                PromptInput.Clear();
+
+                // Setup Progress tracking UI
+                WorkspaceProgressText.Visibility = Visibility.Visible;
+                WorkspaceProgressText.Text = "Initializing embedding model...";
+
+                // The Progress class automatically marshals updates back to the WPF UI thread
+                var progress = new Progress<string>(status =>
+                {
+                    WorkspaceProgressText.Text = status;
+                });
+
+                // Run indexing asynchronously
+                _ = Task.Run(async () =>
+                {
+                    await _workspaceService.InitializeAsync(embedModel);
+                    int chunks = await _workspaceService.IndexDirectoryAsync(path, progress);
+
+                    await Dispatcher.InvokeAsync(() =>
+                    {
+                        // Temporarily turn the text green to indicate success
+                        WorkspaceProgressText.Foreground = new System.Windows.Media.SolidColorBrush(
+                            (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#4CAF50"));
+
+                        WorkspaceProgressText.Text = $"✓ Workspace indexed! {chunks} chunks stored in RAM.";
+
+                        // Hide the progress text automatically after 4 seconds
+                        Task.Delay(4000).ContinueWith(_ =>
+                            Dispatcher.InvokeAsync(() =>
+                            {
+                                WorkspaceProgressText.Visibility = Visibility.Collapsed;
+                                // Reset color back to default AccentBlue for the next run
+                                WorkspaceProgressText.SetResourceReference(TextBlock.ForegroundProperty, "AccentBlue");
+                            })
+                        );
+                    });
+                });
+
+                return; // Stop normal execution; this was a system command.
             }
         }
         // ==========================================
@@ -357,7 +486,21 @@ public partial class MainWindow : Window
                 AttachedImagePreview.Source = null;
             });
 
-            await foreach (var chunk in _chatService.StreamChatAsync(finalPrompt, webContext, imageToProcess))
+            string? ragContext = null;
+            if (_workspaceService.IsInitialized && !string.IsNullOrEmpty(_workspaceService.ActiveWorkspacePath))
+            {
+                // Pull the top 3 most semantically similar code chunks for the given prompt
+                ragContext = await _workspaceService.SearchAsync(finalPrompt, topK: 3);
+            }
+
+            // Merge Web Search Context (if any) with Local RAG Context
+            string combinedContext = "";
+            if (!string.IsNullOrEmpty(webContext)) combinedContext += webContext + "\n";
+            if (!string.IsNullOrEmpty(ragContext)) combinedContext += ragContext + "\n";
+
+            string? finalContext = string.IsNullOrEmpty(combinedContext) ? null : combinedContext;
+
+            await foreach (var chunk in _chatService.StreamChatAsync(finalPrompt, finalContext, imageToProcess))
             {
                 if (_cts.Token.IsCancellationRequested) break;
                 var cleanChunk = CleanToken(chunk);
@@ -662,13 +805,15 @@ public partial class MainWindow : Window
 
         return token
             .Replace("<|assistant|>", "")
-            .Replace("<|user|>",      "")
-            .Replace("<|system|>",    "")
-            .Replace("<|end|>",       "")
-            .Replace("</s>",          "")
-            .Replace("<s>",           "")
-            .Replace("<assistant>",   "")
-            .Replace("</assistant>",  "");
+            .Replace("<|user|>", "")
+            .Replace("<|system|>", "")
+            .Replace("<|end|>", "")
+            .Replace("<|eot_id|>", "") // Strip Llama 3 stop token
+            .Replace("<|im_end|>", "") // Strip ChatML stop token
+            .Replace("</s>", "")
+            .Replace("<s>", "")
+            .Replace("<assistant>", "")
+            .Replace("</assistant>", "");
     }
 
     private static string DetectLanguage(string code)
@@ -1057,6 +1202,46 @@ public partial class MainWindow : Window
 
     private void PromptInput_PreviewKeyDown(object sender, KeyEventArgs e)
     {
+        if (e.Key == Key.V && Keyboard.Modifiers == ModifierKeys.Control)
+        {
+            // Case A: User copied an actual image file from Windows Explorer
+            if (Clipboard.ContainsFileDropList())
+            {
+                var files = Clipboard.GetFileDropList();
+                if (files.Count > 0)
+                {
+                    string firstFile = files[0]!;
+                    string ext = System.IO.Path.GetExtension(firstFile).ToLower();
+                    if (ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".bmp" || ext == ".webp")
+                    {
+                        LoadAttachedImage(firstFile);
+                        e.Handled = true;
+                        return;
+                    }
+                }
+            }
+            // Case B: User used Snipping Tool or right-clicked "Copy Image" on the web
+            else if (Clipboard.ContainsImage())
+            {
+                var image = Clipboard.GetImage();
+                if (image != null)
+                {
+                    // LlamaSharp needs a file, so we quietly save the clipboard image to the Windows Temp folder
+                    string tempPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"execor_clip_{Guid.NewGuid()}.png");
+                    using (var fileStream = new System.IO.FileStream(tempPath, System.IO.FileMode.Create))
+                    {
+                        var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
+                        encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(image));
+                        encoder.Save(fileStream);
+                    }
+
+                    LoadAttachedImage(tempPath);
+                    e.Handled = true;
+                    return; // Prevent the TextBox from trying to paste text
+                }
+            }
+        }
+
         // Check if the key pressed was Enter
         if (e.Key == Key.Enter)
         {

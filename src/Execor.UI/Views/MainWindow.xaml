@@ -320,6 +320,7 @@
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
+                                    <RowDefinition Height="Auto"/>
                                 </Grid.RowDefinitions>
 
                                 <Border x:Name="ImagePreviewContainer" Grid.Row="0" Visibility="Collapsed" Margin="14,10,14,0" HorizontalAlignment="Left">
@@ -337,7 +338,8 @@
                                     </Grid>
                                 </Border>
 
-                                <TextBox x:Name="PromptInput" Grid.Row="1"
+                                <TextBox x:Name="PromptInput" 
+                                         Grid.Row="1"
                                          Background="Transparent"
                                          BorderThickness="0"
                                          Foreground="{StaticResource TextPrimary}"
@@ -352,7 +354,11 @@
                                          VerticalContentAlignment="Top"
                                          PreviewKeyDown="PromptInput_PreviewKeyDown"
                                          KeyDown="PromptInput_KeyDown"
-                                         AcceptsReturn="True"/>
+                                         AcceptsReturn="True"
+                                         
+                                         AllowDrop="True"
+                                         PreviewDragOver="PromptInput_PreviewDragOver"
+                                         Drop="PromptInput_Drop"/>
 
                                 <TextBlock x:Name="PromptPlaceholder" Grid.Row="1"
                                            Text="Message Execor... (Enter to send, Shift+Enter for newline)"
@@ -362,6 +368,14 @@
                                            VerticalAlignment="Top"
                                            IsHitTestVisible="False"
                                            Visibility="Visible"/>
+
+                                <TextBlock x:Name="WorkspaceProgressText" 
+                                           Grid.Row="2" 
+                                           Visibility="Collapsed" 
+                                           Foreground="{StaticResource AccentBlue}" 
+                                           FontSize="11" 
+                                           Margin="14,0,14,8" 
+                                           FontWeight="SemiBold"/>
                             </Grid>
                         </Border>
 

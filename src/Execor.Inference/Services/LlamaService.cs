@@ -228,7 +228,13 @@ public class LlamaService : IChatService
         var inferenceParams = new InferenceParams
         {
             MaxTokens = 1024,
-            AntiPrompts = GetAntiPrompts(activeModel.Name)
+            AntiPrompts = GetAntiPrompts(activeModel.Name),
+            SamplingPipeline = new LLama.Sampling.DefaultSamplingPipeline
+            {
+                RepeatPenalty = 1.15f, // CRITICAL: Breaks infinite word-repetition loops
+                Temperature = 0.7f,    // Keeps the model grounded
+                TopP = 0.9f
+            }
         };
 
         if (!string.IsNullOrEmpty(imagePath) && File.Exists(imagePath))
@@ -300,21 +306,18 @@ public class LlamaService : IChatService
 
     private List<string> GetAntiPrompts(string modelName)
     {
-        modelName = modelName.ToLower();
-
-        if (modelName.Contains("phi"))
-            return new List<string> { "<|user|>", "<|end|>" };
-
-        if (modelName.Contains("llama"))
-            return new List<string> { "<|eot_id|>" };
-
-        if (modelName.Contains("mistral"))
-            return new List<string> { "</s>" };
-
-        if (modelName.Contains("gemma"))
-            return new List<string> { "<end_of_turn>" };
-
-        return new List<string> { "</s>" };
+        // Universally catch all standard End-Of-Turn tokens to prevent infinite loops
+        return new List<string>
+        {
+            "</s>",
+            "<|eot_id|>",       // Llama 3 / 3.2 (This is likely the one you were missing)
+            "<|end_of_text|>",  // Llama 3 Base
+            "<|end|>",          // Phi
+            "<end_of_turn>",    // Gemma
+            "<|im_end|>",       // Qwen / ChatML
+            "User:",
+            "user:"
+        };
     }
 
     private void DisposeCurrentModel()

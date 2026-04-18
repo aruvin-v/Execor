@@ -284,6 +284,7 @@
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
 
                         <Popup x:Name="SlashCommandPopup" 
@@ -316,7 +317,27 @@
                                 Margin="0,0,10,0"
                                 x:Name="InputBorder">
                             <Grid>
-                                <TextBox x:Name="PromptInput"
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+
+                                <Border x:Name="ImagePreviewContainer" Grid.Row="0" Visibility="Collapsed" Margin="14,10,14,0" HorizontalAlignment="Left">
+                                    <Grid>
+                                        <Image x:Name="AttachedImagePreview" Height="60" Width="60" Stretch="UniformToFill" ClipToBounds="True"/>
+                                        <Button x:Name="RemoveImageBtn" Content="✕" Width="18" Height="18" Background="#EF5350" Foreground="White" 
+                                                VerticalAlignment="Top" HorizontalAlignment="Right" Margin="0,-5,-5,0" 
+                                                BorderThickness="0" Cursor="Hand" FontSize="10" Click="RemoveImageBtn_Click">
+                                            <Button.Resources>
+                                                <Style TargetType="Border">
+                                                    <Setter Property="CornerRadius" Value="9"/>
+                                                </Style>
+                                            </Button.Resources>
+                                        </Button>
+                                    </Grid>
+                                </Border>
+
+                                <TextBox x:Name="PromptInput" Grid.Row="1"
                                          Background="Transparent"
                                          BorderThickness="0"
                                          Foreground="{StaticResource TextPrimary}"
@@ -332,7 +353,8 @@
                                          PreviewKeyDown="PromptInput_PreviewKeyDown"
                                          KeyDown="PromptInput_KeyDown"
                                          AcceptsReturn="True"/>
-                                <TextBlock x:Name="PromptPlaceholder"
+
+                                <TextBlock x:Name="PromptPlaceholder" Grid.Row="1"
                                            Text="Message Execor... (Enter to send, Shift+Enter for newline)"
                                            Foreground="{StaticResource TextMuted}"
                                            FontSize="14"
@@ -342,6 +364,10 @@
                                            Visibility="Visible"/>
                             </Grid>
                         </Border>
+
+                        <Button x:Name="AttachButton" Grid.Column="1" Style="{StaticResource GhostButton}" Margin="0,0,8,0" Width="44" Height="44" VerticalAlignment="Bottom" Click="AttachButton_Click" ToolTip="Attach Image">
+                            <TextBlock Text="📎" FontSize="18"/>
+                        </Button>
 
                         <Button x:Name="StopButton" Grid.Column="1" Style="{StaticResource StopButton}" Margin="0,0,8,0" Visibility="Collapsed" MinWidth="70" VerticalAlignment="Bottom">
                             <StackPanel Orientation="Horizontal">

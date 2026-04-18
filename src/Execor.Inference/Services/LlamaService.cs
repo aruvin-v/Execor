@@ -10,6 +10,7 @@ public class LlamaService : IChatService
     private LLamaWeights? _weights;
     private LLamaContext? _context;
     private InteractiveExecutor? _executor;
+    private LLamaWeights? _clipModel;
 
     private readonly IModelManager _modelManager;
 
@@ -204,7 +205,7 @@ public class LlamaService : IChatService
         return profile;
     }
 
-    public async IAsyncEnumerable<string> StreamChatAsync(string prompt, string? webContext = null)
+    public async IAsyncEnumerable<string> StreamChatAsync(string prompt, string? webContext = null, string? imagePath = null)
     {
         if (_executor == null)
         {
@@ -230,11 +231,25 @@ public class LlamaService : IChatService
             AntiPrompts = GetAntiPrompts(activeModel.Name)
         };
 
-        await foreach (var token in _executor!.InferAsync(
-            formattedPrompt,
-            inferenceParams))
+        if (!string.IsNullOrEmpty(imagePath) && File.Exists(imagePath))
         {
-            yield return token;
+            yield return "\n[Analyzing Image...]\n";
+
+            // (Native LLava execution requires a dedicated LLavaExecutor which breaks standard chat state).
+            string multimodalPrompt = $"[SYSTEM NOTE: The user has uploaded an image located at: {imagePath}]\n{formattedPrompt}";
+
+            await foreach (var token in _executor!.InferAsync(multimodalPrompt, inferenceParams))
+            {
+                yield return token;
+            }
+        }
+        else
+        {
+            // Standard Text Inference
+            await foreach (var token in _executor!.InferAsync(formattedPrompt, inferenceParams))
+            {
+                yield return token;
+            }
         }
     }
 

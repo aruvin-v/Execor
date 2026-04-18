@@ -41,6 +41,7 @@ public partial class MainWindow : Window
     private string _reviewRepoPath = "";
     private string _activeDatabaseSchema = "";
     private string _activeConnectionString = "";
+    private string? _currentImagePath = null;
     private enum BlockType { Text, Code }
 
     public MainWindow(IModelManager modelManager, IChatService chatService)
@@ -137,6 +138,32 @@ public partial class MainWindow : Window
         {
             AddMessageBubble("Unable to load models from backend.", false);
         }
+    }
+
+    private void AttachButton_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "Select an Image",
+            Filter = "Image Files|*.jpg;*.jpeg;*.png;*.bmp;*.webp"
+        };
+
+        if (dialog.ShowDialog() == true)
+        {
+            _currentImagePath = dialog.FileName;
+
+            // Load and display thumbnail
+            var bitmap = new System.Windows.Media.Imaging.BitmapImage(new Uri(_currentImagePath));
+            AttachedImagePreview.Source = bitmap;
+            ImagePreviewContainer.Visibility = Visibility.Visible;
+        }
+    }
+
+    private void RemoveImageBtn_Click(object sender, RoutedEventArgs e)
+    {
+        _currentImagePath = null;
+        AttachedImagePreview.Source = null;
+        ImagePreviewContainer.Visibility = Visibility.Collapsed;
     }
 
     // ────────────────────────────────────────────────────────
@@ -320,7 +347,17 @@ public partial class MainWindow : Window
                               $"USER REQUEST: {prompt}";
             }
 
-            await foreach (var chunk in _chatService.StreamChatAsync(prompt, webContext)) // Assuming webContext added
+            string? imageToProcess = _currentImagePath; // Capture before clearing UI
+
+            // Clear UI immediately
+            _currentImagePath = null;
+            await Dispatcher.InvokeAsync(() =>
+            {
+                ImagePreviewContainer.Visibility = Visibility.Collapsed;
+                AttachedImagePreview.Source = null;
+            });
+
+            await foreach (var chunk in _chatService.StreamChatAsync(finalPrompt, webContext, imageToProcess))
             {
                 if (_cts.Token.IsCancellationRequested) break;
                 var cleanChunk = CleanToken(chunk);

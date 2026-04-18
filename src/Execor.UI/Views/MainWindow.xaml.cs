@@ -39,6 +39,8 @@ public partial class MainWindow : Window
     private bool _isCodeReviewMode = false;
     private string _reviewBranchName = "";
     private string _reviewRepoPath = "";
+    private string _activeDatabaseSchema = "";
+    private string _activeConnectionString = "";
     private enum BlockType { Text, Code }
 
     public MainWindow(IModelManager modelManager, IChatService chatService)
@@ -198,6 +200,29 @@ public partial class MainWindow : Window
                 _ = RunCodeReviewAsync(repoPath); // Fire and forget the chunking loop
                 return; // Stop normal chat execution
             }
+
+            if (prompt.StartsWith("/db"))
+            {
+                var dbQuery = prompt.Replace("/db", "").Trim();
+
+                if (string.IsNullOrWhiteSpace(_activeConnectionString) || string.IsNullOrWhiteSpace(_activeDatabaseSchema))
+                {
+                    AddMessageBubble("No database connected. Please click 'Connect Database' first.", isUser: false);
+                    PromptInput.Text = "";
+                    ResetSendState();
+                    return;
+                }
+
+                PromptInput.Text = "";
+                _ = RunDatabaseChatAsync(dbQuery);
+                return; // Stop normal chat execution
+            }
+
+            if (prompt.StartsWith("/exit"))
+            {
+                Close();
+                return;
+            }
         }
         // ==========================================
 
@@ -285,6 +310,15 @@ public partial class MainWindow : Window
             }
 
             string accumulatedText = "";
+
+            string finalPrompt = prompt;
+            if (!string.IsNullOrEmpty(_activeDatabaseSchema))
+            {
+                // We wrap the prompt to give the AI the database context
+                finalPrompt = $"You are an expert Database Administrator. Use the following database schema to answer the user's request. If writing SQL, ensure you use the exact table and column names provided.\n\n" +
+                              $"{_activeDatabaseSchema}\n\n" +
+                              $"USER REQUEST: {prompt}";
+            }
 
             await foreach (var chunk in _chatService.StreamChatAsync(prompt, webContext)) // Assuming webContext added
             {
@@ -505,9 +539,8 @@ public partial class MainWindow : Window
             Foreground = Brushes.White,
             BorderThickness = new Thickness(0),
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
             MinHeight = 40,
-            MaxHeight = 400
         };
 
         var copyButton = new Button
@@ -655,7 +688,9 @@ public partial class MainWindow : Window
         "/web - Force Web Search",
         "/sys - Analyze PC Performance",
         "/clear - Clear Chat History",
-        "/codereview - Review Git changes and export to Word"
+        "/codereview - Review Git changes and export to Word",
+        "/db - Chat with the database",
+        "/exit - Exit the application"
     };
 
     private void PromptInput_TextChanged(object sender, TextChangedEventArgs e)
@@ -1285,5 +1320,129 @@ public partial class MainWindow : Window
         string filePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), fileName);
 
         await File.WriteAllTextAsync(filePath, wordHtml);
+    }
+
+    private void DatabaseButton_Click(object sender, RoutedEventArgs e)
+    {
+        SettingsFrame.Visibility = Visibility.Visible;
+
+        // Update callback to receive both schema and connection string
+        SettingsFrame.Navigate(new DatabasePage((schemaMd, connString) =>
+        {
+            Application.Current.Dispatcher.InvokeAsync(() =>
+            {
+                if (!string.IsNullOrEmpty(schemaMd))
+                {
+                    _activeDatabaseSchema = schemaMd;
+                    _activeConnectionString = connString; // Save the connection string!
+                    AddMessageBubble("Database connected! Use /db [query] to chat with the database.", isUser: false);
+                }
+
+                SettingsFrame.Visibility = Visibility.Collapsed;
+                SettingsFrame.Content = null;
+            });
+        }));
+    }
+
+    private async Task RunDatabaseChatAsync(string userRequest)
+    {
+        _isGenerating = true;
+        SendButton.IsEnabled = false;
+
+        // 1. Setup the UI for the background process
+        AddMessageBubble($"/db {userRequest}", isUser: true);
+        var assistantBlock = AddMessageBubble("🧠 Analyzing schema and generating SQL...", isUser: false);
+        var statusText = new TextBlock { FontSize = 15, Foreground = Brushes.White, TextWrapping = TextWrapping.Wrap };
+        assistantBlock.Children.Add(statusText);
+
+        try
+        {
+            // 2. Build the strict, read-only Prompt
+            string sqlPrompt = $"You are an expert, read-only MS SQL Database Administrator. \n" +
+                               $"Using this exact database schema:\n{_activeDatabaseSchema}\n\n" +
+                               $"Write a valid MS SQL SELECT query to answer the user's request: '{userRequest}'.\n" +
+                               $"CRITICAL RULES:\n" +
+                               $"- You are strictly forbidden from writing UPDATE, INSERT, DELETE, DROP, or ALTER queries.\n" +
+                               $"- Output ONLY the raw SQL code wrapped in ```sql and ``` blocks. \n" +
+                               $"- Do not explain your thought process. Do not write any conversational text.";
+
+            string generatedText = "";
+
+            // ==========================================
+            // NEW: Ensure model is loaded into VRAM before continuing
+            // ==========================================
+            var selectedModel = ModelSelector.SelectedItem as Execor.Models.ModelInfo;
+            if (selectedModel != null)
+            {
+                var activeModel = _modelManager.GetActiveModel();
+                if (activeModel == null || activeModel.Name != selectedModel.Name)
+                {
+                    await Task.Run(() =>
+                    {
+                        _modelManager.SetActiveModel(selectedModel.Name);
+                        _chatService.LoadActiveModel();
+                    });
+                }
+            }
+            // ==========================================
+
+            // 3. Wipe short-term memory to give the model maximum VRAM for writing the query
+            _chatService.ClearHistory();
+
+            // 4. Stream the SQL generation silently in the background
+            await foreach (var chunk in _chatService.StreamChatAsync(sqlPrompt, null))
+            {
+                if (_cts?.IsCancellationRequested == true) break;
+                generatedText += CleanToken(chunk);
+            }
+
+            // 5. Extract the SQL using Regex (in case the model disobeys and adds conversational text)
+            string rawSql = generatedText.Trim();
+            var match = System.Text.RegularExpressions.Regex.Match(
+                generatedText,
+                @"```sql\s*(.*?)\s*```",
+                System.Text.RegularExpressions.RegexOptions.Singleline | System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+            if (match.Success)
+            {
+                rawSql = match.Groups[1].Value.Trim();
+            }
+            else if (rawSql.StartsWith("```") && rawSql.EndsWith("```"))
+            {
+                // Fallback for poorly formatted code blocks
+                rawSql = rawSql.Replace("```sql", "").Replace("```", "").Trim();
+            }
+
+            await Dispatcher.InvokeAsync(() => statusText.Text = $"📝 Executing Query:\n{rawSql}\n\n⚙️ Waiting for database response...");
+
+            // 6. Execute the generated SQL against your actual database via the secure service
+            var dbService = new Execor.Inference.Services.DatabaseSchemaService();
+            string queryResults = await dbService.ExecuteReadOnlyQueryAsync(_activeConnectionString, rawSql);
+
+            /// 7. Format the final output safely and force a tabular monospace render
+            string finalOutput = "**Generated Query:**\n" +
+                                 "```sql\n" + rawSql + "\n```\n\n" +
+                                 "**Database Results:**\n" +
+                                 "```text\n" +
+                                 queryResults +
+                                 "\n```";
+
+            // 8. Render the results back to the UI chat bubble
+            await Dispatcher.InvokeAsync(() =>
+            {
+                assistantBlock.Children.Clear(); // Remove the loading status text
+                SyncStreamingUI(assistantBlock, finalOutput, isFinished: true);
+                ChatScrollViewer.ScrollToEnd();
+            });
+        }
+        catch (Exception ex)
+        {
+            await Dispatcher.InvokeAsync(() => statusText.Text = $"❌ Execution Error: {ex.Message}");
+        }
+        finally
+        {
+            // 9. Clean up state so the user can send the next message
+            ResetSendState();
+        }
     }
 }

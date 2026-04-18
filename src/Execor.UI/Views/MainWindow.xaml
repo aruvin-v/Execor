@@ -50,6 +50,7 @@
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                         <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
 
                     <Border Grid.Row="0"
@@ -211,7 +212,11 @@
                         </ScrollViewer>
                     </Grid>
 
-                    <Button Grid.Row="4" x:Name="SettingsButton" Content="⚙ Settings" 
+                    <Button Grid.Row="4" x:Name="DatabaseButton" Content="🗄 Connect Database" 
+                            Style="{StaticResource GhostButton}" Margin="14,0,14,5" 
+                            HorizontalAlignment="Stretch" Click="DatabaseButton_Click"/>
+
+                    <Button Grid.Row="5" x:Name="SettingsButton" Content="⚙ Settings" 
                             Style="{StaticResource GhostButton}" Margin="14,0,14,14" 
                             HorizontalAlignment="Stretch" Click="SettingsButton_Click"/>
                 </Grid>

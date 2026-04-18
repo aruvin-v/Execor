@@ -1,0 +1,29 @@
+﻿<Page x:Class="Execor.UI.Views.DatabasePage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      Background="{StaticResource BgBase}">
+
+    <StackPanel Margin="30" MaxWidth="600" HorizontalAlignment="Left">
+        <TextBlock Text="Database Integration" FontSize="24" FontWeight="Bold" Foreground="White" Margin="0,0,0,10"/>
+        <TextBlock Text="Connect to a SQL Server to generate a token-efficient schema Markdown file. The AI will use this to write accurate queries." Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap" Margin="0,0,0,30"/>
+
+        <TextBlock Text="Server (e.g., localhost or IP)" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,5"/>
+        <TextBox x:Name="ServerInput" Style="{StaticResource DarkTextBox}" Margin="0,0,0,15"/>
+
+        <TextBlock Text="Database Name" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,5"/>
+        <TextBox x:Name="DatabaseInput" Style="{StaticResource DarkTextBox}" Margin="0,0,0,15"/>
+
+        <CheckBox x:Name="WindowsAuthToggle" Content="Use Windows Authentication" Foreground="White" Margin="0,0,0,15" Checked="AuthToggle_Changed" Unchecked="AuthToggle_Changed"/>
+
+        <StackPanel x:Name="CredentialsPanel">
+            <TextBlock Text="Username" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,5"/>
+            <TextBox x:Name="UsernameInput" Style="{StaticResource DarkTextBox}" Margin="0,0,0,15"/>
+
+            <TextBlock Text="Password" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,5"/>
+            <PasswordBox x:Name="PasswordInput" Background="{StaticResource BgInput}" Foreground="White" BorderBrush="{StaticResource BorderColor}" Padding="10,8" Margin="0,0,0,25"/>
+        </StackPanel>
+
+        <Button x:Name="ConnectBtn" Content="Extract Schema &amp; Enable DB Chat" Style="{StaticResource PrimaryButton}" Click="ConnectBtn_Click"/>
+        <TextBlock x:Name="StatusText" Foreground="{StaticResource AccentBlue}" Margin="0,15,0,0" TextWrapping="Wrap"/>
+    </StackPanel>
+</Page>

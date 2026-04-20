@@ -10,7 +10,7 @@ public class LlamaService : IChatService
     private LLamaWeights? _weights;
     private LLamaContext? _context;
     private InteractiveExecutor? _executor;
-    private LLamaWeights? _clipModel;
+    private bool _isFirstPrompt = true;
 
     private readonly IModelManager _modelManager;
 
@@ -27,6 +27,7 @@ public class LlamaService : IChatService
 
     public void LoadActiveModel()
     {
+        _isFirstPrompt = true;
         var activeModel = _modelManager.GetActiveModel();
        
         if (activeModel == null)
@@ -144,22 +145,20 @@ public class LlamaService : IChatService
     {
         if (gpuAvailable)
         {
-            if (freeVramMB >= 10000) return 1024;
-            if (freeVramMB >= 6000) return 512;
-            if (freeVramMB >= 3000) return 256;
-            return 128;
+            if (freeVramMB >= 8000) return 1024;
+            // Force 512 minimum on GPU. Anything lower severely throttles Time-To-First-Token
+            return 512;
         }
 
         if (ramGB >= 32) return 512;
-        if (ramGB >= 16) return 256;
-        return 128;
+        return 256;
     }
 
     private int CalculateOptimalContextSize(ulong ramGB)
     {
-        if (ramGB >= 32) return 8192;
-        if (ramGB >= 16) return 4096;
-        return 2048;
+        if (ramGB >= 32) return 4096;
+        if (ramGB >= 16) return 2048;
+        return 1024;
     }
 
     private HardwareProfile LoadOrBenchmarkHardware(string modelPath)
@@ -167,7 +166,14 @@ public class LlamaService : IChatService
         if (File.Exists(ProfilePath))
         {
             var json = File.ReadAllText(ProfilePath);
-            return System.Text.Json.JsonSerializer.Deserialize<HardwareProfile>(json)!;
+            var cached = System.Text.Json.JsonSerializer.Deserialize<HardwareProfile>(json);
+
+            // CRITICAL: Only use cache if it's for the EXACT SAME model
+            if (cached != null && cached.ModelPath == modelPath)
+            {
+                return cached;
+            }
+            Console.WriteLine("Model changed. Recalculating hardware profile...");
         }
 
         Console.WriteLine("Running first-time hardware benchmark...");
@@ -190,6 +196,7 @@ public class LlamaService : IChatService
 
         var profile = new HardwareProfile
         {
+            ModelPath = modelPath, // Save it
             GpuLayers = gpuLayers,
             BatchSize = batchSize,
             ContextSize = contextSize,
@@ -223,7 +230,8 @@ public class LlamaService : IChatService
               $"### INSTRUCTION:\nUsing ONLY the context above, provide a direct answer to: {prompt}. " +
               $"If the context contains a specific date or fact, state it clearly. Do not describe the websites.";
 
-        var formattedPrompt = FormatPrompt(finalPrompt, webContext);
+        var formattedPrompt = FormatPrompt(finalPrompt, webContext, _isFirstPrompt);
+        _isFirstPrompt = false;
 
         var inferenceParams = new InferenceParams
         {
@@ -259,7 +267,7 @@ public class LlamaService : IChatService
         }
     }
 
-    private string FormatPrompt(string prompt, string? webContext)
+    private string FormatPrompt(string prompt, string? webContext, bool includeSystem)
     {
         string systemInstruction = "You are Execor, an advanced AI assistant and expert developer.\n\n";
 
@@ -285,10 +293,15 @@ public class LlamaService : IChatService
             {
                 var template = new LLamaTemplate(_weights)
                 {
-                    AddAssistant = true // Automatically appends the trigger for the AI to start typing
+                    AddAssistant = true
                 };
 
-                template.Add("system", systemInstruction);
+                // ONLY add the massive system prompt on the very first turn
+                if (includeSystem)
+                {
+                    template.Add("system", systemInstruction);
+                }
+
                 template.Add("user", prompt);
 
                 var templateBytes = template.Apply();
@@ -332,6 +345,7 @@ public class LlamaService : IChatService
 
     public void ClearHistory()
     {
+        _isFirstPrompt = true;
         if (_weights == null) return;
 
         // Destroy the old memory buffer
@@ -360,6 +374,7 @@ public class LlamaService : IChatService
 
 public class HardwareProfile
 {
+    public string ModelPath { get; set; } = ""; // NEW: Tracks the exact model
     public int GpuLayers { get; set; }
     public int BatchSize { get; set; }
     public int ContextSize { get; set; }

@@ -43,7 +43,7 @@ public partial class MainWindow : Window
     private string _activeDatabaseSchema = "";
     private string _activeConnectionString = "";
     private string? _currentImagePath = null;
-    private enum BlockType { Text, Code }
+    private enum BlockType { Text, Code, Think }
 
     public MainWindow(IModelManager modelManager, IChatService chatService)
     {
@@ -410,6 +410,31 @@ public partial class MainWindow : Window
                 ResetSendState();
                 return; // Stop execution, don't send to LLM
             }
+
+            if (prompt.StartsWith("/scaffold", StringComparison.OrdinalIgnoreCase))
+            {
+                var scaffoldQuery = prompt.Substring(9).Trim(); // Remove "/scaffold"
+
+                if (string.IsNullOrWhiteSpace(scaffoldQuery))
+                {
+                    AddMessageBubble("Please provide a scaffolding request. Example: /scaffold Create a Python FastAPI authentication middleware.", isUser: false);
+                    PromptInput.Text = "";
+                    ResetSendState();
+                    return;
+                }
+
+                if (!_workspaceService.IsInitialized || string.IsNullOrEmpty(_workspaceService.ActiveWorkspacePath))
+                {
+                    AddMessageBubble("⚠️ No workspace loaded. Please run `/workspace [path]` first so I know where to write the files.", isUser: false);
+                    PromptInput.Text = "";
+                    ResetSendState();
+                    return;
+                }
+
+                PromptInput.Text = "";
+                _ = RunScaffoldAsync(scaffoldQuery);
+                return; // Stop normal chat execution
+            }
         }
         // ==========================================
 
@@ -531,6 +556,9 @@ public partial class MainWindow : Window
 
             string? finalContext = string.IsNullOrEmpty(combinedContext) ? null : combinedContext;
 
+            // ADD THIS BEFORE THE LOOP:
+            var lastUiUpdate = DateTime.Now;
+
             await foreach (var chunk in _chatService.StreamChatAsync(finalPrompt, finalContext, imageToProcess))
             {
                 if (_cts.Token.IsCancellationRequested) break;
@@ -547,15 +575,21 @@ public partial class MainWindow : Window
                 accumulatedText += cleanChunk;
                 _metrics.AddToken(cleanChunk);
 
-                await Dispatcher.InvokeAsync(() =>
+                // 🔥 THE MAGIC SAUCE: Throttle updates to ~30 FPS (every 33ms)
+                if ((DateTime.Now - lastUiUpdate).TotalMilliseconds > 33)
                 {
-                    SyncStreamingUI(assistantBlock, accumulatedText);
-                    ChatScrollViewer.ScrollToEnd();
-                });
+                    string textToRender = accumulatedText; // Clone string reference
+                    await Dispatcher.InvokeAsync(() =>
+                    {
+                        SyncStreamingUI(assistantBlock, textToRender);
+                        ChatScrollViewer.ScrollToEnd();
+                    }, DispatcherPriority.Render); // Use Render priority for smoother painting
 
-                await Task.Delay(cleanChunk.Contains(".") || cleanChunk.Contains(",") ? 40 : 10);
+                    lastUiUpdate = DateTime.Now;
+                }
             }
 
+            // Final flush to catch the last few tokens
             await Dispatcher.InvokeAsync(() =>
             {
                 SyncStreamingUI(assistantBlock, accumulatedText, isFinished: true);
@@ -658,20 +692,17 @@ public partial class MainWindow : Window
 
     private void SyncStreamingUI(StackPanel panel, string text, bool isFinished = false)
     {
-        //1. Parse the cleaned text into UI blocks
         var parsedBlocks = ParseMarkdown(text);
 
         while (panel.Children.Count < parsedBlocks.Count)
         {
             var block = parsedBlocks[panel.Children.Count];
             if (block.Type == BlockType.Text)
-            {
                 panel.Children.Add(new TextBlock { TextWrapping = TextWrapping.Wrap, FontSize = 15, Foreground = Brushes.White, LineHeight = 22 });
-            }
-            else
-            {
+            else if (block.Type == BlockType.Code)
                 panel.Children.Add(CreateSyntaxHighlightedCodeBox("", block.Language));
-            }
+            else if (block.Type == BlockType.Think)
+                panel.Children.Add(CreateThinkingBox(""));
         }
 
         // Clean up previous blocks
@@ -679,10 +710,18 @@ public partial class MainWindow : Window
         {
             if (parsedBlocks[i].Type == BlockType.Text)
                 ((TextBlock)panel.Children[i]).Text = parsedBlocks[i].Text;
-            else
+            else if (parsedBlocks[i].Type == BlockType.Code)
             {
                 var editor = FindTextEditor(panel.Children[i]);
                 if (editor != null) editor.Text = parsedBlocks[i].Text;
+            }
+            else if (parsedBlocks[i].Type == BlockType.Think)
+            {
+                var tb = FindThinkingTextBlock(panel.Children[i]);
+                if (tb != null) tb.Text = parsedBlocks[i].Text;
+
+                // Auto-collapse previous thoughts when the AI moves on to the final answer
+                if (panel.Children[i] is Expander exp) exp.IsExpanded = false;
             }
         }
 
@@ -690,16 +729,20 @@ public partial class MainWindow : Window
         if (parsedBlocks.Any())
         {
             var lastParsed = parsedBlocks.Last();
-            // Important: we only want to update the standard blocks here, not the OptionsPanel if it exists
             var lastUI = panel.Children.OfType<FrameworkElement>().LastOrDefault(c => c.Name != "OptionsPanel");
-
             string cursor = isFinished ? "" : "▋";
 
-            if (lastUI is TextBlock tb)
+            if (lastUI is TextBlock tb && lastParsed.Type == BlockType.Text)
             {
                 tb.Text = lastParsed.Text + cursor;
             }
-            else if (lastUI != null)
+            else if (lastUI is Expander exp && lastParsed.Type == BlockType.Think)
+            {
+                var thinkTb = FindThinkingTextBlock(exp);
+                if (thinkTb != null) thinkTb.Text = lastParsed.Text + cursor;
+                exp.IsExpanded = true; // Keep expanded while actively typing
+            }
+            else if (lastUI != null && lastParsed.Type == BlockType.Code)
             {
                 var editor = FindTextEditor(lastUI);
                 if (editor != null)
@@ -808,6 +851,41 @@ public partial class MainWindow : Window
         };
     }
 
+    private UIElement CreateThinkingBox(string text)
+    {
+        var tb = new TextBlock
+        {
+            Text = text,
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = new SolidColorBrush(Color.FromRgb(160, 160, 160)),
+            FontSize = 14,
+            FontStyle = FontStyles.Italic,
+            LineHeight = 22
+        };
+
+        return new Expander
+        {
+            Header = new TextBlock { Text = "🤔 Thought Process", Foreground = Brushes.LightGray, FontWeight = FontWeights.SemiBold },
+            Content = new Border
+            {
+                BorderBrush = new SolidColorBrush(Color.FromRgb(60, 60, 60)),
+                BorderThickness = new Thickness(2, 0, 0, 0),
+                Padding = new Thickness(10, 5, 0, 5),
+                Margin = new Thickness(5, 5, 0, 10),
+                Child = tb
+            },
+            IsExpanded = true, // Keep expanded while generating
+            Margin = new Thickness(0, 5, 0, 10)
+        };
+    }
+
+    private TextBlock? FindThinkingTextBlock(UIElement element)
+    {
+        if (element is Expander exp && exp.Content is Border b && b.Child is TextBlock tb)
+            return tb;
+        return null;
+    }
+
     /// Builds a simple rounded ControlTemplate for a Button used in code (avoids XAML duplication).
     private static ControlTemplate BuildRoundedButtonTemplate(double radius)
     {
@@ -905,7 +983,8 @@ public partial class MainWindow : Window
         "/codereview - Review Git changes and export to Word",
         "/db - Chat with the database",
         "/exit - Exit the application",
-        "/workspace - Chat with the files"
+        "/workspace - Chat with the files",
+        "/scaffold [prompt] - Generate and write project files directly to disk",
     };
 
     private void PromptInput_TextChanged(object sender, TextChangedEventArgs e)
@@ -1329,32 +1408,50 @@ public partial class MainWindow : Window
     private List<ParsedBlock> ParseMarkdown(string text)
     {
         var blocks = new List<ParsedBlock>();
-        var parts = text.Split(new[] { "```" }, StringSplitOptions.None);
 
-        for (int i = 0; i < parts.Length; i++)
+        // 1. Extract <think> blocks first using Regex
+        var thinkParts = System.Text.RegularExpressions.Regex.Split(text, @"(<think>.*?</think>|<think>.*$)", System.Text.RegularExpressions.RegexOptions.Singleline);
+
+        foreach (var thinkPart in thinkParts)
         {
-            if (i % 2 == 0) // Even indices are normal text
+            if (string.IsNullOrEmpty(thinkPart)) continue;
+
+            if (thinkPart.StartsWith("<think>"))
             {
-                blocks.Add(new ParsedBlock { Type = BlockType.Text, Text = parts[i] });
+                string thinkContent = thinkPart.Replace("<think>", "").Replace("</think>", "").TrimStart('\n', '\r');
+                blocks.Add(new ParsedBlock { Type = BlockType.Think, Text = thinkContent });
             }
-            else // Odd indices are inside code blocks
+            else
             {
-                var codePart = parts[i];
-                string lang = "";
-                int newlineIdx = codePart.IndexOf('\n');
-
-                if (newlineIdx != -1 && newlineIdx < 20)
+                // 2. Parse code blocks normally within the remaining text
+                var parts = thinkPart.Split(new[] { "```" }, StringSplitOptions.None);
+                for (int i = 0; i < parts.Length; i++)
                 {
-                    lang = codePart.Substring(0, newlineIdx).Trim();
-                    codePart = codePart.Substring(newlineIdx + 1);
-                }
-                else if (codePart.Length < 20 && !codePart.Contains(" "))
-                {
-                    lang = codePart.Trim(); // Still typing language name
-                    codePart = "";
-                }
+                    if (i % 2 == 0) // Normal text
+                    {
+                        if (!string.IsNullOrEmpty(parts[i]))
+                            blocks.Add(new ParsedBlock { Type = BlockType.Text, Text = parts[i] });
+                    }
+                    else // Inside a code block
+                    {
+                        var codePart = parts[i];
+                        string lang = "";
+                        int newlineIdx = codePart.IndexOf('\n');
 
-                blocks.Add(new ParsedBlock { Type = BlockType.Code, Text = codePart, Language = lang });
+                        if (newlineIdx != -1 && newlineIdx < 20)
+                        {
+                            lang = codePart.Substring(0, newlineIdx).Trim();
+                            codePart = codePart.Substring(newlineIdx + 1);
+                        }
+                        else if (codePart.Length < 20 && !codePart.Contains(" "))
+                        {
+                            lang = codePart.Trim();
+                            codePart = "";
+                        }
+
+                        blocks.Add(new ParsedBlock { Type = BlockType.Code, Text = codePart, Language = lang });
+                    }
+                }
             }
         }
         return blocks;
@@ -1697,6 +1794,125 @@ public partial class MainWindow : Window
         finally
         {
             // 9. Clean up state so the user can send the next message
+            ResetSendState();
+        }
+    }
+
+    private async Task RunScaffoldAsync(string userRequest)
+    {
+        _isGenerating = true;
+        SendButton.IsEnabled = false;
+
+        // Render initial UI state
+        AddMessageBubble($"/scaffold {userRequest}", isUser: true);
+        var assistantBlock = AddMessageBubble("🏗️ Analyzing architecture and scaffolding files...", isUser: false);
+        var statusText = new TextBlock { FontSize = 15, Foreground = Brushes.White, TextWrapping = TextWrapping.Wrap };
+        assistantBlock.Children.Add(statusText);
+
+        try
+        {
+            // 1. Ensure Model is Loaded
+            var selectedModel = ModelSelector.SelectedItem as ModelInfo;
+            if (selectedModel != null)
+            {
+                var activeModel = _modelManager.GetActiveModel();
+                if (activeModel == null || activeModel.Name != selectedModel.Name)
+                {
+                    await Task.Run(() =>
+                    {
+                        _modelManager.SetActiveModel(selectedModel.Name);
+                        _chatService.LoadActiveModel();
+                    });
+                }
+            }
+
+            // 2. Gather Local RAG Context to match coding styles/namespaces
+            string? ragContext = await _workspaceService.SearchAsync($"Architecture conventions for: {userRequest}", topK: 3);
+            string baseDir = _workspaceService.ActiveWorkspacePath;
+
+            // 3. The Strict Scaffolding Prompt
+            string scaffoldPrompt =
+                $"You are an expert software architect. The user wants to scaffold the following inside their current project: '{userRequest}'.\n\n" +
+                $"### CONTEXT (Current Project Code):\n{ragContext}\n\n" +
+                $"### INSTRUCTIONS:\n" +
+                $"1. Determine the necessary files to create. Adapt to the project's language and framework.\n" +
+                $"2. If this is a MASSIVE request, DO NOT generate thousands of lines of code. Instead, generate the foundational/core files, AND generate a `scaffolding_plan.md` file containing the exact instructions and architecture for the remaining components.\n" +
+                $"3. You MUST format EVERY file you want to create using this EXACT syntax:\n\n" +
+                $"### FILE: relative/path/to/filename.ext\n" +
+                $"```language\n" +
+                $"// full code here\n" +
+                $"```\n\n" +
+                $"Do not deviate from this format. I am parsing your output with a script.";
+
+            // Wipe history to maximize VRAM for code generation
+            _chatService.ClearHistory();
+
+            string generatedOutput = "";
+            await foreach (var chunk in _chatService.StreamChatAsync(scaffoldPrompt, null))
+            {
+                if (_cts?.IsCancellationRequested == true) break;
+                generatedOutput += CleanToken(chunk);
+            }
+
+            await Dispatcher.InvokeAsync(() => statusText.Text = "💾 Parsing generated code and writing to disk...");
+
+            // 4. Parse the output using Regex to extract File Paths and Code
+            // This regex captures the file path after "### FILE:" and the code block content
+            var regex = new System.Text.RegularExpressions.Regex(
+                @"### FILE:\s*([^\n\r]+)[\s\S]*?```[a-zA-Z0-9]*\s*\n([\s\S]*?)```",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+            var matches = regex.Matches(generatedOutput);
+            int filesCreated = 0;
+            string reportMarkdown = "**Scaffolding Complete!**\n\nThe following files were created/modified:\n\n";
+
+            if (matches.Count == 0)
+            {
+                reportMarkdown = "⚠️ **Warning:** No files were generated. The AI did not follow the scaffolding syntax. Here was its raw response:\n\n" + generatedOutput;
+            }
+            else
+            {
+                foreach (System.Text.RegularExpressions.Match match in matches)
+                {
+                    string relativePath = match.Groups[1].Value.Trim();
+                    string fileContent = match.Groups[2].Value.TrimEnd();
+
+                    // Sanitize path to prevent directory traversal attacks (e.g., ../../../Windows/System32)
+                    relativePath = relativePath.Replace("..\\", "").Replace("../", "");
+
+                    string fullPath = Path.Combine(baseDir, relativePath);
+
+                    // Ensure directory exists
+                    string? dir = Path.GetDirectoryName(fullPath);
+                    if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                    {
+                        Directory.CreateDirectory(dir);
+                    }
+
+                    // Write the file
+                    await File.WriteAllTextAsync(fullPath, fileContent);
+                    filesCreated++;
+
+                    reportMarkdown += $"- ✅ `{relativePath}`\n";
+                }
+
+                reportMarkdown += $"\n*Total files successfully written to `{baseDir}`: {filesCreated}*";
+            }
+
+            // 5. Render Final Output
+            await Dispatcher.InvokeAsync(() =>
+            {
+                assistantBlock.Children.Clear();
+                SyncStreamingUI(assistantBlock, reportMarkdown, isFinished: true);
+                ChatScrollViewer.ScrollToEnd();
+            });
+        }
+        catch (Exception ex)
+        {
+            await Dispatcher.InvokeAsync(() => statusText.Text = $"❌ Scaffolding Error: {ex.Message}");
+        }
+        finally
+        {
             ResetSendState();
         }
     }

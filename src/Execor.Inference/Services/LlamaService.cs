@@ -1,4 +1,5 @@
 ﻿using Execor.Core;
+using Execor.Models;
 using LLama;
 using LLama.Common;
 using LLama.Native;
@@ -267,9 +268,21 @@ public class LlamaService : IChatService
         }
     }
 
-    private string FormatPrompt(string prompt, string? webContext, bool includeSystem)
+    private string FormatPrompt(string prompt, string? webContext, bool includeSystem, List<McpTool>? mcpTools = null)
     {
         string systemInstruction = "You are Execor, an advanced AI assistant and expert developer.\n\n";
+
+        if (mcpTools != null && mcpTools.Count > 0)
+        {
+            systemInstruction += "### AVAILABLE TOOLS\n" +
+                                 "You have access to the following MCP tools. To use a tool, you MUST output EXACTLY this XML format: " +
+                                 "<tool_call>{\"name\": \"tool_name\", \"arguments\": {\"arg1\": \"value\"}}</tool_call>\n\n" +
+                                 "TOOLS LIST:\n";
+            foreach (var tool in mcpTools)
+            {
+                systemInstruction += $"- {tool.Name}: {tool.Description}\n  Schema: {tool.InputSchema.GetRawText()}\n\n";
+            }
+        }
 
         if (!string.IsNullOrWhiteSpace(webContext) && webContext.Contains("Web Search Results:"))
         {

@@ -12,6 +12,7 @@ using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Json;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -37,6 +38,7 @@ public partial class MainWindow : Window
     private CancellationTokenSource? _dashboardCts;
     private readonly IModelManager _modelManager;
     private readonly IChatService _chatService;
+    private readonly McpClientService _mcpService = new(); 
     private bool _isCodeReviewMode = false;
     private string _reviewBranchName = "";
     private string _reviewRepoPath = "";
@@ -75,6 +77,7 @@ public partial class MainWindow : Window
         StartDashboardMonitoring();
         LoadModels();
         LoadChatSessions();
+        InitializeDefaultMcpServers();
     }
 
     // ────────────────────────────────────────────────────────
@@ -435,6 +438,32 @@ public partial class MainWindow : Window
                 _ = RunScaffoldAsync(scaffoldQuery);
                 return; // Stop normal chat execution
             }
+
+            if (prompt.StartsWith("/mcp connect"))
+            {
+                // Example: Connect to the local filesystem MCP server via npx
+                string targetDir = @"C:\Projects"; // Or wherever your code is
+
+                AddMessageBubble($"Connecting to Filesystem MCP Server at {targetDir}...", isUser: true);
+
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        // Ensure you have Node.js installed, this uses npx to run the official filesystem server
+                        await _mcpService.ConnectAsync("npx", $"-y @modelcontextprotocol/server-filesystem {targetDir}");
+                        await Dispatcher.InvokeAsync(() => AddMessageBubble($"✅ MCP Connected! {_mcpService.AvailableTools.Count} tools loaded.", false));
+                    }
+                    catch (Exception ex)
+                    {
+                        await Dispatcher.InvokeAsync(() => AddMessageBubble($"❌ MCP Error: {ex.Message}", false));
+                    }
+                });
+
+                PromptInput.Clear();
+                ResetSendState();
+                return;
+            }
         }
         // ==========================================
 
@@ -573,6 +602,49 @@ public partial class MainWindow : Window
                 }
 
                 accumulatedText += cleanChunk;
+
+                if (accumulatedText.Contains("</tool_call>"))
+                {
+                    // 1. Extract the JSON payload
+                    var match = System.Text.RegularExpressions.Regex.Match(accumulatedText, @"<tool_call>(.*?)</tool_call>", System.Text.RegularExpressions.RegexOptions.Singleline);
+                    if (match.Success)
+                    {
+                        string toolJson = match.Groups[1].Value.Trim();
+                        try
+                        {
+                            var toolPayload = JsonSerializer.Deserialize<McpCallToolRequest>(toolJson);
+                            if (toolPayload != null)
+                            {
+                                await Dispatcher.InvokeAsync(() =>
+                                {
+                                    assistantBlock.Children.Add(new TextBlock { Text = $"\n\n⚙️ Executing MCP Tool: {toolPayload.Name}...", Foreground = System.Windows.Media.Brushes.Cyan });
+                                });
+
+                                // 2. Execute the Tool securely via the Pipe
+                                string toolResult = await _mcpService.CallToolAsync(toolPayload.Name, toolPayload.Arguments);
+
+                                // 3. Append the result back into the LLM context to finish the thought
+                                string followUpPrompt = $"TOOL RESULT:\n{toolResult}\n\nContinue your response based on this data.";
+
+                                // Clean the accumulated text so the user doesn't see the raw JSON
+                                accumulatedText = accumulatedText.Replace(match.Value, "");
+
+                                // Start a secondary stream to finish the answer
+                                await foreach (var followupChunk in _chatService.StreamChatAsync(followUpPrompt, null, null))
+                                {
+                                    accumulatedText += CleanToken(followupChunk);
+                                    // (Apply your standard 30 FPS render throttle here)
+                                }
+                                break; // Exit the primary loop
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            accumulatedText += $"\n[Tool Execution Failed: {ex.Message}]";
+                        }
+                    }
+                }
+
                 _metrics.AddToken(cleanChunk);
 
                 // 🔥 THE MAGIC SAUCE: Throttle updates to ~30 FPS (every 33ms)
@@ -1914,6 +1986,32 @@ public partial class MainWindow : Window
         finally
         {
             ResetSendState();
+        }
+    }
+
+    private async void InitializeDefaultMcpServers()
+    {
+        try
+        {
+            // Example: Auto-connect to the Filesystem server pointing at your projects folder
+            string targetDir = @"A:\Projects\Execor\src\Execor.API";
+
+            await _mcpService.ConnectAsync("npx.cmd", $"-y @modelcontextprotocol/server-filesystem {targetDir}");
+
+            // Optionally notify the UI silently
+            await Dispatcher.InvokeAsync(() =>
+            {
+                // We add this silently to the background, or you can add a small status indicator 
+                // to your UI (like a green dot) to show MCP is active.
+                Console.WriteLine($"✅ Auto-Connected to MCP. {_mcpService.AvailableTools.Count} tools loaded.");
+            });
+        }
+        catch (Exception ex)
+        {
+            await Dispatcher.InvokeAsync(() =>
+            {
+                Console.WriteLine($"❌ Auto-Connect MCP Error: {ex.Message}");
+            });
         }
     }
 }

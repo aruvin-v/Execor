@@ -54,7 +54,7 @@ public class McpClientService : IDisposable
         await SendNotificationAsync("notifications/initialized");
 
         // 3. Fetch Available Tools
-        var toolsReq = new JsonRpcRequest { Method = "tools/list" };
+        var toolsReq = new JsonRpcRequest { Method = "tools/list", Params = new { } };
         var toolsResponse = await SendRequestAsync(toolsReq);
 
         if (toolsResponse.TryGetProperty("tools", out var toolsArray))
@@ -88,7 +88,7 @@ public class McpClientService : IDisposable
 
     private async Task<JsonElement> SendRequestAsync(JsonRpcRequest request)
     {
-        var tcs = new TaskCompletionSource<JsonElement>();
+        var tcs = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
         _pendingRequests[request.Id] = tcs;
 
         string json = JsonSerializer.Serialize(request);
@@ -100,7 +100,7 @@ public class McpClientService : IDisposable
 
     private async Task SendNotificationAsync(string method)
     {
-        var notification = new { jsonrpc = "2.0", method = method };
+        var notification = new { jsonrpc = "2.0", method = method, @params = new { } };
         await _writer!.WriteLineAsync(JsonSerializer.Serialize(notification));
         await _writer.FlushAsync();
     }
@@ -114,19 +114,33 @@ public class McpClientService : IDisposable
                 string? line = await _reader.ReadLineAsync();
                 if (string.IsNullOrWhiteSpace(line)) continue;
 
-                var response = JsonSerializer.Deserialize<JsonRpcResponse>(line);
-                if (response != null && response.Id != null && _pendingRequests.TryRemove(response.Id, out var tcs))
+                try
                 {
-                    if (response.Error != null)
-                        tcs.SetException(new Exception(response.Error.Value.GetRawText()));
-                    else
-                        tcs.SetResult(response.Result ?? default);
+                    var response = JsonSerializer.Deserialize<JsonRpcResponse>(line);
+                    string? responseId = response?.Id?.ToString(); // Safely handle int or string IDs
+
+                    if (responseId != null && _pendingRequests.TryRemove(responseId, out var tcs))
+                    {
+                        if (response!.Error != null)
+                            tcs.TrySetException(new Exception(response.Error.Value.GetRawText()));
+                        else
+                            tcs.TrySetResult(response.Result ?? default);
+                    }
+                }
+                catch (JsonException)
+                {
+                    // Silently ignore non-JSON output (like Node update warnings)
                 }
             }
         }
-        catch (Exception ex)
+        finally
         {
-            Console.WriteLine($"MCP Pipe Error: {ex.Message}");
+            // 🔥 CRITICAL FIX: If the stream dies (Node crashes), cancel all pending UI waits!
+            foreach (var kvp in _pendingRequests)
+            {
+                kvp.Value.TrySetException(new Exception("MCP Server disconnected unexpectedly."));
+            }
+            _pendingRequests.Clear();
         }
     }
 

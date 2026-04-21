@@ -213,7 +213,7 @@ public class LlamaService : IChatService
         return profile;
     }
 
-    public async IAsyncEnumerable<string> StreamChatAsync(string prompt, string? webContext = null, string? imagePath = null)
+    public async IAsyncEnumerable<string> StreamChatAsync(string prompt, string? webContext = null, string? imagePath = null, List<McpTool>? mcpTools = null)
     {
         if (_executor == null)
         {
@@ -231,7 +231,7 @@ public class LlamaService : IChatService
               $"### INSTRUCTION:\nUsing ONLY the context above, provide a direct answer to: {prompt}. " +
               $"If the context contains a specific date or fact, state it clearly. Do not describe the websites.";
 
-        var formattedPrompt = FormatPrompt(finalPrompt, webContext, _isFirstPrompt);
+        var formattedPrompt = FormatPrompt(finalPrompt, webContext, _isFirstPrompt, mcpTools);
         _isFirstPrompt = false;
 
         var inferenceParams = new InferenceParams
@@ -274,10 +274,11 @@ public class LlamaService : IChatService
 
         if (mcpTools != null && mcpTools.Count > 0)
         {
-            systemInstruction += "### AVAILABLE TOOLS\n" +
-                                 "You have access to the following MCP tools. To use a tool, you MUST output EXACTLY this XML format: " +
+            systemInstruction += "### AVAILABLE SYSTEM TOOLS\n" +
+                                 "You have access to the following tools. If you need to read a file, write a file, or perform an action to answer the prompt, you MUST output EXACTLY this XML format to trigger the tool:\n" +
                                  "<tool_call>{\"name\": \"tool_name\", \"arguments\": {\"arg1\": \"value\"}}</tool_call>\n\n" +
                                  "TOOLS LIST:\n";
+
             foreach (var tool in mcpTools)
             {
                 systemInstruction += $"- {tool.Name}: {tool.Description}\n  Schema: {tool.InputSchema.GetRawText()}\n\n";

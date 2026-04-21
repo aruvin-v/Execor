@@ -588,7 +588,7 @@ public partial class MainWindow : Window
             // ADD THIS BEFORE THE LOOP:
             var lastUiUpdate = DateTime.Now;
 
-            await foreach (var chunk in _chatService.StreamChatAsync(finalPrompt, finalContext, imageToProcess))
+            await foreach (var chunk in _chatService.StreamChatAsync(finalPrompt, finalContext, imageToProcess, _mcpService.AvailableTools))
             {
                 if (_cts.Token.IsCancellationRequested) break;
                 var cleanChunk = CleanToken(chunk);
@@ -630,7 +630,7 @@ public partial class MainWindow : Window
                                 accumulatedText = accumulatedText.Replace(match.Value, "");
 
                                 // Start a secondary stream to finish the answer
-                                await foreach (var followupChunk in _chatService.StreamChatAsync(followUpPrompt, null, null))
+                                await foreach (var followupChunk in _chatService.StreamChatAsync(followUpPrompt, null, null, _mcpService.AvailableTools))
                                 {
                                     accumulatedText += CleanToken(followupChunk);
                                     // (Apply your standard 30 FPS render throttle here)
@@ -1452,8 +1452,8 @@ public partial class MainWindow : Window
         // 1. Show the frame
         SettingsFrame.Visibility = Visibility.Visible;
 
-        // 2. Navigate and pass the callback
-        SettingsFrame.Navigate(new SettingsPage(_modelManager, (settingsChanged) =>
+        // 2. Navigate and pass the callback (REPLACE THIS LINE)
+        SettingsFrame.Navigate(new SettingsPage(_modelManager, _mcpService.AvailableTools, (settingsChanged) =>
         {
             // 3. Use Dispatcher.InvokeAsync to safely close the frame 
             // after the page's button click event has fully resolved.
@@ -1993,24 +1993,29 @@ public partial class MainWindow : Window
     {
         try
         {
-            // Example: Auto-connect to the Filesystem server pointing at your projects folder
-            string targetDir = @"A:\Projects\Execor\src\Execor.API";
+            string targetDir = @"A:\Projects\Execor\src\Execor.API\";
 
-            await _mcpService.ConnectAsync("npx.cmd", $"-y @modelcontextprotocol/server-filesystem {targetDir}");
-
-            // Optionally notify the UI silently
+            // 1. Tell the UI we are attempting to connect
             await Dispatcher.InvokeAsync(() =>
             {
-                // We add this silently to the background, or you can add a small status indicator 
-                // to your UI (like a green dot) to show MCP is active.
-                Console.WriteLine($"✅ Auto-Connected to MCP. {_mcpService.AvailableTools.Count} tools loaded.");
+                AddMessageBubble("🔌 Booting Filesystem MCP Server in the background...", isUser: false);
+            });
+
+            // 2. Wrap npx inside cmd.exe to guarantee Windows finds it in your PATH variable
+            await _mcpService.ConnectAsync("cmd.exe", $"/c npx -y @modelcontextprotocol/server-filesystem \"{targetDir}\"");
+
+            // 3. Announce success
+            await Dispatcher.InvokeAsync(() =>
+            {
+                AddMessageBubble($"✅ MCP Connected! {_mcpService.AvailableTools.Count} tools loaded and ready.", isUser: false);
             });
         }
         catch (Exception ex)
         {
+            // 4. Announce failure so we can debug it
             await Dispatcher.InvokeAsync(() =>
             {
-                Console.WriteLine($"❌ Auto-Connect MCP Error: {ex.Message}");
+                AddMessageBubble($"❌ MCP Auto-Connect Failed: {ex.Message}", isUser: false);
             });
         }
     }

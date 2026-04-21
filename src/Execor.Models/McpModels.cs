@@ -10,13 +10,18 @@ public class JsonRpcRequest
     [JsonPropertyName("jsonrpc")] public string JsonRpc { get; set; } = "2.0";
     [JsonPropertyName("id")] public string Id { get; set; } = Guid.NewGuid().ToString();
     [JsonPropertyName("method")] public string Method { get; set; } = string.Empty;
-    [JsonPropertyName("params")] public object? Params { get; set; }
+
+    [JsonPropertyName("params")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public object? Params { get; set; }
 }
 
 public class JsonRpcResponse
 {
     [JsonPropertyName("jsonrpc")] public string JsonRpc { get; set; } = "2.0";
-    [JsonPropertyName("id")] public string? Id { get; set; }
+
+    [JsonPropertyName("id")] public JsonElement? Id { get; set; }
+
     [JsonPropertyName("result")] public JsonElement? Result { get; set; }
     [JsonPropertyName("error")] public JsonElement? Error { get; set; }
 }

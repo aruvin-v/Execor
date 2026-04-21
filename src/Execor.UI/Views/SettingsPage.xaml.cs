@@ -6,6 +6,8 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Controls;
+using System.Collections.Generic;
+using Execor.Models;
 
 namespace Execor.UI.Views;
 
@@ -14,7 +16,7 @@ public partial class SettingsPage : Page
     private readonly IModelManager _modelManager;
     private readonly Action<bool> _onClose;
 
-    public SettingsPage(IModelManager modelManager, Action<bool> onClose)
+    public SettingsPage(IModelManager modelManager, List<McpTool> mcpTools, Action<bool> onClose)
     {
         InitializeComponent();
         _modelManager = modelManager;
@@ -22,6 +24,8 @@ public partial class SettingsPage : Page
 
         ModelsPathInput.Text = _modelManager.GetModelsPath();
         ContextSizeInput.Text = "4096"; // Can be expanded to read from config later
+
+        McpToolsList.ItemsSource = mcpTools;
     }
 
     private void BrowseFolderBtn_Click(object sender, RoutedEventArgs e)

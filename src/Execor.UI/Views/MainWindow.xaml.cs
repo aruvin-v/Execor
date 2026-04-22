@@ -38,7 +38,7 @@ public partial class MainWindow : Window
     private CancellationTokenSource? _dashboardCts;
     private readonly IModelManager _modelManager;
     private readonly IChatService _chatService;
-    private readonly McpClientService _mcpService = new(); 
+    private readonly McpClientService _mcpService = new();
     private bool _isCodeReviewMode = false;
     private string _reviewBranchName = "";
     private string _reviewRepoPath = "";
@@ -55,21 +55,21 @@ public partial class MainWindow : Window
         _chatService = chatService;
 
         // Wire up all events (mirroring original Avalonia wiring)
-        SendButton.Click         += SendButton_Click;
+        SendButton.Click += SendButton_Click;
         RefreshModelsButton.Click += (_, _) => LoadModels();
-        NewChatButton.Click      += (_, _) => CreateNewChat();
-        StopButton.Click         += (_, _) => _cts?.Cancel();
+        NewChatButton.Click += (_, _) => CreateNewChat();
+        StopButton.Click += (_, _) => _cts?.Cancel();
 
-        PromptInput.KeyDown    += PromptInput_KeyDown;
+        PromptInput.KeyDown += PromptInput_KeyDown;
         PromptInput.TextChanged += PromptInput_TextChanged;
-        SearchChatsInput.KeyUp  += (_, _) => RefreshConversationSidebar();
+        SearchChatsInput.KeyUp += (_, _) => RefreshConversationSidebar();
 
         _systemMonitor = new SystemMonitorService();
-        _metrics       = new InferenceMetricsService();
-        _gpuMonitor    = new GpuMonitorService();
+        _metrics = new InferenceMetricsService();
+        _gpuMonitor = new GpuMonitorService();
 
         // Input border focus visual
-        PromptInput.GotFocus  += (_, _) => InputBorder.BorderBrush =
+        PromptInput.GotFocus += (_, _) => InputBorder.BorderBrush =
             (SolidColorBrush)FindResource("AccentBlue");
         PromptInput.LostFocus += (_, _) => InputBorder.BorderBrush =
             (SolidColorBrush)FindResource("BorderColor");
@@ -438,34 +438,10 @@ public partial class MainWindow : Window
                 _ = RunScaffoldAsync(scaffoldQuery);
                 return; // Stop normal chat execution
             }
-
-            if (prompt.StartsWith("/mcp connect"))
-            {
-                // Example: Connect to the local filesystem MCP server via npx
-                string targetDir = @"C:\Projects"; // Or wherever your code is
-
-                AddMessageBubble($"Connecting to Filesystem MCP Server at {targetDir}...", isUser: true);
-
-                _ = Task.Run(async () =>
-                {
-                    try
-                    {
-                        // Ensure you have Node.js installed, this uses npx to run the official filesystem server
-                        await _mcpService.ConnectAsync("npx", $"-y @modelcontextprotocol/server-filesystem {targetDir}");
-                        await Dispatcher.InvokeAsync(() => AddMessageBubble($"✅ MCP Connected! {_mcpService.AvailableTools.Count} tools loaded.", false));
-                    }
-                    catch (Exception ex)
-                    {
-                        await Dispatcher.InvokeAsync(() => AddMessageBubble($"❌ MCP Error: {ex.Message}", false));
-                    }
-                });
-
-                PromptInput.Clear();
-                ResetSendState();
-                return;
-            }
         }
         // ==========================================
+
+        var activeTools = SelectRelevantTools(prompt);
 
         _metrics.Start();
 
@@ -588,7 +564,7 @@ public partial class MainWindow : Window
             // ADD THIS BEFORE THE LOOP:
             var lastUiUpdate = DateTime.Now;
 
-            await foreach (var chunk in _chatService.StreamChatAsync(finalPrompt, finalContext, imageToProcess, _mcpService.AvailableTools))
+            await foreach (var chunk in _chatService.StreamChatAsync(finalPrompt, finalContext, imageToProcess, activeTools))
             {
                 if (_cts.Token.IsCancellationRequested) break;
                 var cleanChunk = CleanToken(chunk);
@@ -603,44 +579,85 @@ public partial class MainWindow : Window
 
                 accumulatedText += cleanChunk;
 
+                // File: src/Execor.UI/Views/MainWindow.xaml.cs
+
                 if (accumulatedText.Contains("</tool_call>"))
                 {
-                    // 1. Extract the JSON payload
-                    var match = System.Text.RegularExpressions.Regex.Match(accumulatedText, @"<tool_call>(.*?)</tool_call>", System.Text.RegularExpressions.RegexOptions.Singleline);
+                    var match = System.Text.RegularExpressions.Regex.Match(
+                        accumulatedText,
+                        @"<tool_call>\s*(.*?)\s*</tool_call>",
+                        System.Text.RegularExpressions.RegexOptions.Singleline | System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
                     if (match.Success)
                     {
                         string toolJson = match.Groups[1].Value.Trim();
+
+                        // 1. Sanitize Markdown backticks if the AI accidentally wraps the JSON
+                        toolJson = System.Text.RegularExpressions.Regex.Replace(toolJson, @"^```[a-zA-Z]*\s*", "");
+                        toolJson = System.Text.RegularExpressions.Regex.Replace(toolJson, @"\s*```$", "");
+
+                        // 2. CRITICAL FIX: Remove the raw XML tag from the UI buffer entirely
+                        accumulatedText = accumulatedText.Replace(match.Value, "");
+
                         try
                         {
-                            var toolPayload = JsonSerializer.Deserialize<McpCallToolRequest>(toolJson);
+                            var options = new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+                            var toolPayload = System.Text.Json.JsonSerializer.Deserialize<Execor.Models.McpCallToolRequest>(toolJson, options);
+
                             if (toolPayload != null)
                             {
+                                // 3. Inject a standard Markdown blockquote into the stream so the UI parser renders it naturally
+                                accumulatedText += $"\n\n> ⚙️ **Executing MCP Tool:** `{toolPayload.Name}`...\n\n";
+
+                                // Force an immediate UI render so the user sees the loading status
+                                string statusText = accumulatedText;
                                 await Dispatcher.InvokeAsync(() =>
                                 {
-                                    assistantBlock.Children.Add(new TextBlock { Text = $"\n\n⚙️ Executing MCP Tool: {toolPayload.Name}...", Foreground = System.Windows.Media.Brushes.Cyan });
+                                    SyncStreamingUI(assistantBlock, statusText);
+                                    ChatScrollViewer.ScrollToEnd();
                                 });
 
-                                // 2. Execute the Tool securely via the Pipe
+                                // 4. Call the tool securely
                                 string toolResult = await _mcpService.CallToolAsync(toolPayload.Name, toolPayload.Arguments);
 
-                                // 3. Append the result back into the LLM context to finish the thought
-                                string followUpPrompt = $"TOOL RESULT:\n{toolResult}\n\nContinue your response based on this data.";
+                                // Add a completion checkmark to the UI
+                                accumulatedText += $"> ✅ **Tool execution complete.**\n\n";
 
-                                // Clean the accumulated text so the user doesn't see the raw JSON
-                                accumulatedText = accumulatedText.Replace(match.Value, "");
+                                // 5. Send the retrieved data back to the LLM to finalize its response
+                                // 5. Send the retrieved data back to the LLM to finalize its response
+                                string followUpPrompt =
+                                    $"TOOL RESULT:\n{toolResult}\n\n" +
+                                    $"Finalize your response based on this data. " +
+                                    $"CRITICAL FORMATTING RULES FOR FILE LISTS:\n" +
+                                    $"1. You MUST include EVERY SINGLE ITEM from the tool result. DO NOT skip, summarize, or omit any files or folders.\n" +
+                                    $"2. DO NOT invent nesting. Keep the exact flat structure provided by the tool.\n" +
+                                    $"3. Format the list inside a ```text markdown block.\n" +
+                                    $"4. Replace '[DIR]' with '📁 ' and '[FILE]' with '📄 ' to make it look clean.";
 
-                                // Start a secondary stream to finish the answer
-                                await foreach (var followupChunk in _chatService.StreamChatAsync(followUpPrompt, null, null, _mcpService.AvailableTools))
+                                // Note: Make sure 'relevantTools' is the variable you created in the previous step
+                                await foreach (var followupChunk in _chatService.StreamChatAsync(followUpPrompt, null, null, activeTools))
                                 {
                                     accumulatedText += CleanToken(followupChunk);
-                                    // (Apply your standard 30 FPS render throttle here)
+
+                                    // Standard 30 FPS render throttle
+                                    if ((DateTime.Now - lastUiUpdate).TotalMilliseconds > 33)
+                                    {
+                                        string textToRender = accumulatedText;
+                                        await Dispatcher.InvokeAsync(() =>
+                                        {
+                                            SyncStreamingUI(assistantBlock, textToRender);
+                                            ChatScrollViewer.ScrollToEnd();
+                                        }, System.Windows.Threading.DispatcherPriority.Render);
+                                        lastUiUpdate = DateTime.Now;
+                                    }
                                 }
-                                break; // Exit the primary loop
+                                break; // Exit the primary streaming loop
                             }
                         }
                         catch (Exception ex)
                         {
-                            accumulatedText += $"\n[Tool Execution Failed: {ex.Message}]";
+                            // If the AI hallucinates bad JSON, display the error neatly in the chat
+                            accumulatedText += $"\n\n> ⚠️ **Tool Execution Failed:** {ex.Message}\n\n";
                         }
                     }
                 }
@@ -691,8 +708,8 @@ public partial class MainWindow : Window
 
     private void ResetSendState()
     {
-        _isGenerating         = false;
-        SendButton.IsEnabled  = true;
+        _isGenerating = false;
+        SendButton.IsEnabled = true;
         StopButton.Visibility = Visibility.Collapsed;
     }
 
@@ -1001,20 +1018,18 @@ public partial class MainWindow : Window
     {
         string s = code.ToLower();
 
-        if (s.Contains("def ") || s.Contains("import ") || s.Contains("print("))
-            return "Python";
-        if (s.Contains("using ") || s.Contains("namespace ") || s.Contains("Console.WriteLine"))
-            return "C#";
-        if (s.Contains("<html") || s.Contains("<body") || s.Contains("<div"))
-            return "HTML";
-        if (s.Contains("function ") || s.Contains("const ") || s.Contains("let "))
-            return "JavaScript";
-        if (s.Contains("{") && s.Contains("}") && s.Contains(":"))
-            return "JSON";
-        if (s.Contains("SELECT ") || s.Contains("FROM "))
-            return "SQL";
+        if (s.Contains("def ") || s.Contains("import ") || s.Contains("print(")) return "Python";
+        if (s.Contains("using ") || s.Contains("namespace ") || s.Contains("Console.WriteLine")) return "C#";
+        if (s.Contains("<html") || s.Contains("<body") || s.Contains("<div")) return "HTML";
+        if (s.Contains("function ") || s.Contains("const ") || s.Contains("let ")) return "JavaScript";
+        if (s.Contains("{") && s.Contains("}") && s.Contains(":")) return "JSON";
+        if (s.Contains("SELECT ") || s.Contains("FROM ")) return "SQL";
 
-        return "C#";
+        // Catch file trees
+        if (s.Contains("├──") || s.Contains("└──") || s.Contains("[file]") || s.Contains("[dir]")) return "Text";
+
+        // CHANGED: Default to Text instead of C#
+        return "Text";
     }
 
     // ────────────────────────────────────────────────────────
@@ -1165,12 +1180,12 @@ public partial class MainWindow : Window
 
             var row = new Border
             {
-                Margin          = new Thickness(0, 2, 0, 2),
-                CornerRadius    = new CornerRadius(8),
-                Background      = isActive
+                Margin = new Thickness(0, 2, 0, 2),
+                CornerRadius = new CornerRadius(8),
+                Background = isActive
                     ? (Brush)FindResource("BgSelected")
                     : Brushes.Transparent,
-                Padding         = new Thickness(4, 2, 4, 2)
+                Padding = new Thickness(4, 2, 4, 2)
             };
 
             var grid = new Grid();
@@ -1184,15 +1199,15 @@ public partial class MainWindow : Window
             {
                 Content = chat.IsPinned ? $"📌 {chat.Title}" : chat.Title,
                 HorizontalContentAlignment = HorizontalAlignment.Left,
-                Background      = Brushes.Transparent,
+                Background = Brushes.Transparent,
                 BorderThickness = new Thickness(0),
-                Foreground      = isActive
+                Foreground = isActive
                     ? (Brush)FindResource("TextPrimary")
                     : (Brush)FindResource("TextSecondary"),
-                FontSize        = 13,
-                Padding         = new Thickness(6, 6, 6, 6),
-                Cursor          = Cursors.Hand,
-                ToolTip         = chat.Title
+                FontSize = 13,
+                Padding = new Thickness(6, 6, 6, 6),
+                Cursor = Cursors.Hand,
+                ToolTip = chat.Title
             };
             // Clip the title inside the button via TextBlock
             if (openBtn.Content is string titleStr)
@@ -1200,9 +1215,9 @@ public partial class MainWindow : Window
                 openBtn.Content = null;
                 openBtn.Content = new TextBlock
                 {
-                    Text          = titleStr,
-                    TextTrimming  = TextTrimming.CharacterEllipsis,
-                    MaxWidth      = 140
+                    Text = titleStr,
+                    TextTrimming = TextTrimming.CharacterEllipsis,
+                    MaxWidth = 140
                 };
             }
             openBtn.Click += (_, _) => OpenChat(chat);
@@ -1210,18 +1225,18 @@ public partial class MainWindow : Window
             // ---- Rename ----
             var renameBtn = new Button
             {
-                Content         = "✏",
-                Style           = (Style)FindResource("GhostButton"),
-                ToolTip         = "Rename"
+                Content = "✏",
+                Style = (Style)FindResource("GhostButton"),
+                ToolTip = "Rename"
             };
             renameBtn.Click += (_, _) => RenameChat(chat);
 
             // ---- Pin ----
             var pinBtn = new Button
             {
-                Content  = chat.IsPinned ? "📍" : "📌",
-                Style    = (Style)FindResource("GhostButton"),
-                ToolTip  = chat.IsPinned ? "Unpin" : "Pin"
+                Content = chat.IsPinned ? "📍" : "📌",
+                Style = (Style)FindResource("GhostButton"),
+                ToolTip = chat.IsPinned ? "Unpin" : "Pin"
             };
             pinBtn.Click += (_, _) =>
             {
@@ -1234,15 +1249,15 @@ public partial class MainWindow : Window
             var deleteBtn = new Button
             {
                 Content = "🗑",
-                Style   = (Style)FindResource("DangerButton"),
+                Style = (Style)FindResource("DangerButton"),
                 ToolTip = "Delete"
             };
             deleteBtn.Click += (_, _) => DeleteChat(chat);
 
-            Grid.SetColumn(openBtn,    0);
-            Grid.SetColumn(renameBtn,  1);
-            Grid.SetColumn(pinBtn,     2);
-            Grid.SetColumn(deleteBtn,  3);
+            Grid.SetColumn(openBtn, 0);
+            Grid.SetColumn(renameBtn, 1);
+            Grid.SetColumn(pinBtn, 2);
+            Grid.SetColumn(deleteBtn, 3);
 
             grid.Children.Add(openBtn);
             grid.Children.Add(renameBtn);
@@ -1283,8 +1298,8 @@ public partial class MainWindow : Window
     private void RenameChat(ChatSessionModel chat)
     {
         // Simple rename (appends marker — same behaviour as original)
-        chat.Title      = chat.Title + " (Renamed)";
-        chat.UpdatedAt  = DateTime.Now;
+        chat.Title = chat.Title + " (Renamed)";
+        chat.UpdatedAt = DateTime.Now;
         SaveChats();
         RefreshConversationSidebar();
     }
@@ -1315,19 +1330,19 @@ public partial class MainWindow : Window
         {
             while (!_dashboardCts.Token.IsCancellationRequested)
             {
-                var gpu     = await _gpuMonitor.GetGpuStatsAsync();
-                var sys     = await _systemMonitor.GetSystemStatsAsync();
-                float tokSec  = _metrics.GetTokensPerSecond();
+                var gpu = await _gpuMonitor.GetGpuStatsAsync();
+                var sys = await _systemMonitor.GetSystemStatsAsync();
+                float tokSec = _metrics.GetTokensPerSecond();
                 float elapsed = _metrics.GetElapsedSeconds();
 
                 await Dispatcher.InvokeAsync(() =>
                 {
-                    GpuNameText.Text     = gpu.gpuName;
-                    GpuUsageText.Text    = $"{gpu.usage}%";
-                    GpuMemoryText.Text   = $"{gpu.usedMB} / {gpu.totalMB} MB";
-                    CudaStatusText.Text  = gpu.status;
-                    CpuUsageText.Text    = $"{sys.cpuUsage:F1}%";
-                    RamUsageText.Text    = $"{sys.usedRamGB:F1} / {sys.totalRamGB:F1} GB";
+                    GpuNameText.Text = gpu.gpuName;
+                    GpuUsageText.Text = $"{gpu.usage}%";
+                    GpuMemoryText.Text = $"{gpu.usedMB} / {gpu.totalMB} MB";
+                    CudaStatusText.Text = gpu.status;
+                    CpuUsageText.Text = $"{sys.cpuUsage:F1}%";
+                    RamUsageText.Text = $"{sys.usedRamGB:F1} / {sys.totalRamGB:F1} GB";
                     TokensPerSecText.Text = $"{tokSec:F1} tok/s";
                     ModelLoadTimeText.Text = $"{elapsed:F1} sec";
                 });
@@ -1344,20 +1359,20 @@ public partial class MainWindow : Window
     }
 
     // 1. Add this new method to map Markdown languages to AvalonEdit definitions
-    private IHighlightingDefinition GetHighlightingDefinition(string language)
+    private IHighlightingDefinition? GetHighlightingDefinition(string language)
     {
-        if (string.IsNullOrWhiteSpace(language))
-            return HighlightingManager.Instance.GetDefinition("C#");
+        // CHANGED: If no language is provided, or it's "text", return null to disable highlighting
+        if (string.IsNullOrWhiteSpace(language) || language.Equals("text", StringComparison.OrdinalIgnoreCase))
+            return null;
 
-        // Normalize to lowercase for safe matching
         language = language.ToLowerInvariant();
 
-        string defName = language switch
+        string? defName = language switch
         {
             "c#" or "cs" or "csharp" => "C#",
             "c++" or "cpp" => "C++",
             "javascript" or "js" => "JavaScript",
-            "typescript" or "ts" => "JavaScript", // Fallback for TS
+            "typescript" or "ts" => "JavaScript",
             "html" or "htm" => "HTML",
             "xml" => "XML",
             "css" => "CSS",
@@ -1365,11 +1380,12 @@ public partial class MainWindow : Window
             "java" => "Java",
             "php" => "PHP",
             "sql" => "TSQL",
-            "json" => "JavaScript", // JSON highlights well as JS
+            "json" => "JavaScript",
             "markdown" or "md" => "MarkDown",
             "powershell" or "ps1" => "PowerShell",
-            "bash" or "sh" or "shell" => "PowerShell", // Fallback for bash
+            "bash" or "sh" or "shell" => "PowerShell",
             "vb" or "vbnet" => "VB",
+            "text" or "tree" or "txt" => null, // Explicitly map to null
             _ => null
         };
 
@@ -1379,9 +1395,8 @@ public partial class MainWindow : Window
             if (definition != null) return definition;
         }
 
-        // Try exact match as a last resort
-        return HighlightingManager.Instance.GetDefinition(language)
-            ?? HighlightingManager.Instance.GetDefinition("C#");
+        // CHANGED: Return the exact match if found, otherwise return null (No default C# fallback)
+        return HighlightingManager.Instance.GetDefinition(language);
     }
 
     private void PromptInput_PreviewKeyDown(object sender, KeyEventArgs e)
@@ -1993,30 +2008,51 @@ public partial class MainWindow : Window
     {
         try
         {
-            string targetDir = @"A:\Projects\Execor\src\Execor.API\";
+            // UPDATED: Point this to the root project folder so the AI can see UI, API, Core, etc.
+            string targetDir = @"A:\Projects\";
 
-            // 1. Tell the UI we are attempting to connect
             await Dispatcher.InvokeAsync(() =>
             {
-                AddMessageBubble("🔌 Booting Filesystem MCP Server in the background...", isUser: false);
+                AddMessageBubble("🔌 Booting Filesystem MCP Server...", isUser: false);
             });
 
-            // 2. Wrap npx inside cmd.exe to guarantee Windows finds it in your PATH variable
-            await _mcpService.ConnectAsync("cmd.exe", $"/c npx -y @modelcontextprotocol/server-filesystem \"{targetDir}\"");
+            // UPDATED: Added "ProjectRoot" as the server name to match the new McpClientService signature
+            await _mcpService.ConnectAsync("ProjectRoot", "cmd.exe", $"/c npx -y @modelcontextprotocol/server-filesystem \"{targetDir}\"");
 
-            // 3. Announce success
             await Dispatcher.InvokeAsync(() =>
             {
-                AddMessageBubble($"✅ MCP Connected! {_mcpService.AvailableTools.Count} tools loaded and ready.", isUser: false);
+                AddMessageBubble($"✅ MCP Connected! {_mcpService.AvailableTools.Count} tools loaded for the entire project.", false);
             });
         }
         catch (Exception ex)
         {
-            // 4. Announce failure so we can debug it
             await Dispatcher.InvokeAsync(() =>
             {
-                AddMessageBubble($"❌ MCP Auto-Connect Failed: {ex.Message}", isUser: false);
+                AddMessageBubble($"❌ MCP Auto-Connect Failed: {ex.Message}", false);
             });
         }
+    }
+
+    private List<McpTool> SelectRelevantTools(string prompt)
+    {
+        var query = prompt.ToLower();
+        var allTools = _mcpService.AvailableTools;
+
+        if (allTools.Count <= 5) return allTools;
+
+        var scoredTools = allTools
+            .Select(t => new
+            {
+                Tool = t,
+                // Improved matching: split names like "list_directory" to match standard English words
+                Score = (t.Name.ToLower().Split('_').Any(part => query.Contains(part)) ? 5 : 0) +
+                        (t.Description.ToLower().Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                                      .Count(w => w.Length > 3 && query.Contains(w)))
+            })
+            .OrderByDescending(x => x.Score)
+            .ToList();
+
+        // FALLBACK: Always return the top 5 tools so the AI is never left blind
+        return scoredTools.Take(5).Select(x => x.Tool).ToList();
     }
 }

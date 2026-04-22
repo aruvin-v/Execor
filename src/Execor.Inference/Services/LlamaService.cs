@@ -272,19 +272,6 @@ public class LlamaService : IChatService
     {
         string systemInstruction = "You are Execor, an advanced AI assistant and expert developer.\n\n";
 
-        if (mcpTools != null && mcpTools.Count > 0)
-        {
-            systemInstruction += "### AVAILABLE SYSTEM TOOLS\n" +
-                                 "You have access to the following tools. If you need to read a file, write a file, or perform an action to answer the prompt, you MUST output EXACTLY this XML format to trigger the tool:\n" +
-                                 "<tool_call>{\"name\": \"tool_name\", \"arguments\": {\"arg1\": \"value\"}}</tool_call>\n\n" +
-                                 "TOOLS LIST:\n";
-
-            foreach (var tool in mcpTools)
-            {
-                systemInstruction += $"- {tool.Name}: {tool.Description}\n  Schema: {tool.InputSchema.GetRawText()}\n\n";
-            }
-        }
-
         if (!string.IsNullOrWhiteSpace(webContext) && webContext.Contains("Web Search Results:"))
         {
             systemInstruction +=
@@ -301,34 +288,29 @@ public class LlamaService : IChatService
         // ==========================================
         // DYNAMIC CHAT TEMPLATE EXTRACTION
         // ==========================================
-        if (_weights != null)
+        string toolInstruction = "";
+        if (mcpTools != null && mcpTools.Count > 0)
         {
-            try
-            {
-                var template = new LLamaTemplate(_weights)
-                {
-                    AddAssistant = true
-                };
-
-                // ONLY add the massive system prompt on the very first turn
-                if (includeSystem)
-                {
-                    template.Add("system", systemInstruction);
-                }
-
-                template.Add("user", prompt);
-
-                var templateBytes = template.Apply();
-                return System.Text.Encoding.UTF8.GetString(templateBytes);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[Warning] Failed to apply embedded chat template: {ex.Message}");
-            }
+            toolInstruction = "\n### AVAILABLE SYSTEM TOOLS\n" +
+                              "You MUST use the provided tools to read files or list directories. DO NOT guess or hallucinate file contents.\n" +
+                              "To trigger a tool, output EXACTLY this JSON format (ensure Windows paths use double backslashes \\\\):\n" +
+                              "<tool_call>{\"name\": \"tool_name\", \"arguments\": {\"arg1\": \"value\"}}</tool_call>\n\n" +
+                              "TOOLS:\n" + string.Join("\n", mcpTools.Select(t => $"- {t.Name}: {t.Description}"));
         }
 
-        // Fallback for extremely old models missing the embedded Jinja template
-        return $"{systemInstruction}\n\nUser: {prompt}\nExecor:";
+        if (_weights != null)
+        {
+            var template = new LLamaTemplate(_weights) { AddAssistant = true };
+
+            if (includeSystem) template.Add("system", systemInstruction);
+
+            string userPayload = string.IsNullOrEmpty(toolInstruction) ? prompt : $"{toolInstruction}\n\nUSER PROMPT: {prompt}";
+            template.Add("user", userPayload);
+
+            return System.Text.Encoding.UTF8.GetString(template.Apply());
+        }
+
+        return $"{systemInstruction}\n{toolInstruction}\nUser: {prompt}\nExecor:";
     }
 
     private List<string> GetAntiPrompts(string modelName)

@@ -1,98 +1,98 @@
-﻿using System;
+﻿// File: src/Execor.Inference/Services/McpClientService.cs
+
 using System.Collections.Concurrent;
-using System.Collections.Generic;
 using System.Diagnostics;
-using System.IO;
 using System.Text.Json;
-using System.Threading;
-using System.Threading.Tasks;
 using Execor.Models;
 
 namespace Execor.Inference.Services;
 
 public class McpClientService : IDisposable
 {
-    private Process? _serverProcess;
-    private StreamWriter? _writer;
-    private StreamReader? _reader;
-    private readonly ConcurrentDictionary<string, TaskCompletionSource<JsonElement>> _pendingRequests = new();
+    private readonly ConcurrentDictionary<string, McpServerInstance> _servers = new();
+    public List<McpTool> AvailableTools => _servers.Values.SelectMany(s => s.Tools).ToList();
 
-    public List<McpTool> AvailableTools { get; private set; } = new();
-    public bool IsConnected => _serverProcess != null && !_serverProcess.HasExited;
-
-    public async Task ConnectAsync(string executable, string arguments)
+    public async Task ConnectAsync(string serverName, string executable, string arguments)
     {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = executable,
-            Arguments = arguments,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        _serverProcess = new Process { StartInfo = startInfo };
-        _serverProcess.Start();
-
-        _writer = _serverProcess.StandardInput;
-        _reader = _serverProcess.StandardOutput;
-
-        // Start listening to the stdout pipe in the background
-        _ = Task.Run(ListenLoop);
-
-        // 1. Initialize Handshake
-        var initReq = new JsonRpcRequest
-        {
-            Method = "initialize",
-            Params = new { protocolVersion = "2024-11-05", capabilities = new { }, clientInfo = new { name = "Execor", version = "1.0.0" } }
-        };
-        await SendRequestAsync(initReq);
-
-        // 2. Send initialized notification
-        await SendNotificationAsync("notifications/initialized");
-
-        // 3. Fetch Available Tools
-        var toolsReq = new JsonRpcRequest { Method = "tools/list", Params = new { } };
-        var toolsResponse = await SendRequestAsync(toolsReq);
-
-        if (toolsResponse.TryGetProperty("tools", out var toolsArray))
-        {
-            AvailableTools = JsonSerializer.Deserialize<List<McpTool>>(toolsArray.GetRawText()) ?? new();
-        }
+        var instance = new McpServerInstance();
+        await instance.StartAsync(executable, arguments);
+        _servers[serverName] = instance;
     }
 
     public async Task<string> CallToolAsync(string toolName, Dictionary<string, object> arguments)
     {
-        var req = new JsonRpcRequest
-        {
-            Method = "tools/call",
-            Params = new McpCallToolRequest { Name = toolName, Arguments = arguments }
-        };
+        // Find which server owns this tool
+        var server = _servers.Values.FirstOrDefault(s => s.Tools.Any(t => t.Name == toolName));
+        if (server == null) return $"❌ Error: Tool '{toolName}' not found on any connected MCP server.";
 
-        var response = await SendRequestAsync(req);
-
-        if (response.TryGetProperty("content", out var contentArray) && contentArray.GetArrayLength() > 0)
-        {
-            return contentArray[0].GetProperty("text").GetString() ?? "Success (No output)";
-        }
-
-        if (response.TryGetProperty("isError", out var isError) && isError.GetBoolean())
-        {
-            return "Tool Execution Error.";
-        }
-
-        return response.GetRawText();
+        return await server.CallToolAsync(toolName, arguments);
     }
 
-    private async Task<JsonElement> SendRequestAsync(JsonRpcRequest request)
+    public void Dispose()
     {
-        var tcs = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _pendingRequests[request.Id] = tcs;
+        foreach (var server in _servers.Values) server.Dispose();
+        _servers.Clear();
+    }
+}
 
-        string json = JsonSerializer.Serialize(request);
-        await _writer!.WriteLineAsync(json);
+internal class McpServerInstance : IDisposable
+{
+    private Process? _process;
+    private StreamWriter? _writer;
+    private readonly ConcurrentDictionary<string, TaskCompletionSource<JsonElement>> _pendingRequests = new();
+    public List<McpTool> Tools { get; private set; } = new();
+
+    public async Task StartAsync(string executable, string arguments)
+    {
+        _process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = executable,
+                Arguments = arguments,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            }
+        };
+
+        _process.Start();
+        _writer = _process.StandardInput;
+
+        _ = Task.Run(ListenLoop);
+
+        // Handshake
+        await SendRequestAsync("initialize", new { protocolVersion = "2024-11-05", capabilities = new { }, clientInfo = new { name = "Execor", version = "1.0.0" } });
+        await SendNotificationAsync("notifications/initialized");
+
+        // Load Tools
+        var response = await SendRequestAsync("tools/list", new { });
+        if (response.TryGetProperty("tools", out var toolsArray))
+        {
+            Tools = JsonSerializer.Deserialize<List<McpTool>>(toolsArray.GetRawText()) ?? new();
+        }
+    }
+
+    public async Task<string> CallToolAsync(string name, Dictionary<string, object> args)
+    {
+        var response = await SendRequestAsync("tools/call", new { name, arguments = args });
+        if (response.TryGetProperty("content", out var content) && content.GetArrayLength() > 0)
+        {
+            return content[0].GetProperty("text").GetString() ?? "Success";
+        }
+        return "Tool execution returned no text.";
+    }
+
+    private async Task<JsonElement> SendRequestAsync(string method, object? @params)
+    {
+        var id = Guid.NewGuid().ToString();
+        var tcs = new TaskCompletionSource<JsonElement>();
+        _pendingRequests[id] = tcs;
+
+        var request = new { jsonrpc = "2.0", id, method, @params };
+        await _writer!.WriteLineAsync(JsonSerializer.Serialize(request));
         await _writer.FlushAsync();
 
         return await tcs.Task;
@@ -100,53 +100,29 @@ public class McpClientService : IDisposable
 
     private async Task SendNotificationAsync(string method)
     {
-        var notification = new { jsonrpc = "2.0", method = method, @params = new { } };
-        await _writer!.WriteLineAsync(JsonSerializer.Serialize(notification));
+        var note = new { jsonrpc = "2.0", method };
+        await _writer!.WriteLineAsync(JsonSerializer.Serialize(note));
         await _writer.FlushAsync();
     }
 
     private async Task ListenLoop()
     {
-        try
+        using var reader = _process!.StandardOutput;
+        while (!reader.EndOfStream)
         {
-            while (_reader != null && !_reader.EndOfStream)
+            var line = await reader.ReadLineAsync();
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            try
             {
-                string? line = await _reader.ReadLineAsync();
-                if (string.IsNullOrWhiteSpace(line)) continue;
-
-                try
+                var resp = JsonSerializer.Deserialize<JsonRpcResponse>(line);
+                if (resp?.Id != null && _pendingRequests.TryRemove(resp.Id.Value.GetRawText().Trim('"'), out var tcs))
                 {
-                    var response = JsonSerializer.Deserialize<JsonRpcResponse>(line);
-                    string? responseId = response?.Id?.ToString(); // Safely handle int or string IDs
-
-                    if (responseId != null && _pendingRequests.TryRemove(responseId, out var tcs))
-                    {
-                        if (response!.Error != null)
-                            tcs.TrySetException(new Exception(response.Error.Value.GetRawText()));
-                        else
-                            tcs.TrySetResult(response.Result ?? default);
-                    }
-                }
-                catch (JsonException)
-                {
-                    // Silently ignore non-JSON output (like Node update warnings)
+                    tcs.SetResult(resp.Result ?? default);
                 }
             }
-        }
-        finally
-        {
-            // 🔥 CRITICAL FIX: If the stream dies (Node crashes), cancel all pending UI waits!
-            foreach (var kvp in _pendingRequests)
-            {
-                kvp.Value.TrySetException(new Exception("MCP Server disconnected unexpectedly."));
-            }
-            _pendingRequests.Clear();
+            catch { }
         }
     }
 
-    public void Dispose()
-    {
-        _serverProcess?.Kill();
-        _serverProcess?.Dispose();
-    }
+    public void Dispose() { _process?.Kill(); _process?.Dispose(); }
 }
